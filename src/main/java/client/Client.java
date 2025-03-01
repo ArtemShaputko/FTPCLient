@@ -7,7 +7,6 @@ import java.io.*;
 import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.nio.ByteBuffer;
-import java.nio.ByteOrder;
 import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -83,28 +82,30 @@ class Client {
     public void downloadFile(String remotePath, String localPath, boolean resume) throws IOException {
         Path outputPath = Paths.get(localPath).toAbsolutePath();
         Files.createDirectories(outputPath.getParent());
-        var is = socket.getInputStream();
+        var dis = new DataInputStream(socket.getInputStream());
+        var dos = new DataOutputStream(socket.getOutputStream());
         try (FileOutputStream fos = new FileOutputStream(outputPath.toFile(), resume);
                  FileChannel channel = fos.getChannel()) {
-
-            byte[] fileSizeBytes = new byte[Integer.BYTES];
-            if (is.read(fileSizeBytes) < Integer.BYTES) {
-                System.out.println("Не получилось определить размер файла");
+            long existingSize = Files.exists(outputPath) ? Files.size(outputPath) : 0;
+            if(resume) {
+                dos.writeLong(Long.reverseBytes(existingSize));
+            }
+            dos.write(0); // Синхронизация канала
+            long extraSize = Long.reverseBytes(dis.readLong());
+            if(extraSize < 0) {
+                consoleWriter.println("Невозможно получить длину файла");
                 return;
             }
-            int fileSize = ByteBuffer.wrap(fileSizeBytes).order(ByteOrder.LITTLE_ENDIAN).getInt();
-            long existingSize = Files.exists(outputPath) ? Files.size(outputPath) : 0;
-
             try (ProgressBar pb = new ProgressBarBuilder()
                     .setTaskName("Скачивание " + remotePath)
-                    .setInitialMax(fileSize)
+                    .setInitialMax(existingSize + extraSize)
                     .build()) {
 
                 long startTime = System.nanoTime();
                 pb.stepTo(existingSize);
 
-                if (existingSize < fileSize) {
-                    transferFileWithProgress(channel, fileSize, existingSize, is, pb);
+                if (extraSize > 0) {
+                    transferFileWithProgress(channel, extraSize, existingSize, dis, pb);
                 }
                 double duration = (System.nanoTime() - startTime) / 1e9;
                 double speedMBs = (pb.getCurrent() / (1024.0 * 1024.0)) / duration;
@@ -121,27 +122,29 @@ class Client {
 
     private void transferFileWithProgress(
             FileChannel channel,
-            long fileSize,
-            long offset,
+            long sizeToReceive,
+            long currentFileSize,
             InputStream is,
             ProgressBar pb
     ) throws IOException {
         ByteBuffer buffer = ByteBuffer.allocate(8192);
-        long transferred = offset;
+        long received = 0;
 
-        pb.stepTo(offset); // Учет уже скачанной части
-
-        while (transferred < fileSize && isConnected.get()) {
+        while (received < sizeToReceive && isConnected.get()) {
             int read = is.read(buffer.array());
             if (read == -1) break;
 
             buffer.limit(read);
-            channel.write(buffer, transferred);
+            channel.write(buffer, currentFileSize + received);
             buffer.clear();
-            transferred += read;
+            received += read;
 
             pb.stepBy(read); // Обновление прогресса
         }
+        consoleWriter.println("Начальный размер файла: " + currentFileSize + " байт");
+        consoleWriter.println("Требовалось получить: " + sizeToReceive + " байт");
+        consoleWriter.println("Получено: " + received + " байт");
+
     }
 
     public void closeConnection() {

@@ -11,7 +11,6 @@ import java.io.IOException;
 import java.io.PrintWriter;
 import java.util.List;
 import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
 
@@ -68,7 +67,7 @@ public class CommunicationManager {
                 case SERVER -> handleServerContext(line, words, writer);
             }
         } catch (Exception e) {
-            writer.println("Ошибка: " + e.getMessage());
+            writer.println("Ошибка обрабтки строки: " + e.getMessage());
         }
     }
 
@@ -82,19 +81,22 @@ public class CommunicationManager {
     }
 
     private void handleServerContext(String line, List<String> words, PrintWriter writer) {
-        String response = client.sendAndWait(line);
-        if (response != null && !response.isEmpty()) {
-            writer.println(response);
-        }
-
         switch (words.getFirst().toLowerCase()) {
             case "close" -> {
+                String response = client.sendAndWait(line);
+                if (response != null && !response.isEmpty()) {
+                    writer.println(response);
+                }
                 client.closeConnection();
                 currentContext = Context.MAIN;
                 prompt = "> ";
             }
-            case "download" -> handleDownload(words, writer);
+            case "download" -> handleDownload(line, words, writer);
             default -> {
+                String response = client.sendAndWait(line);
+                if (response != null && !response.isEmpty()) {
+                    writer.println(response);
+                }
             }
         }
     }
@@ -117,16 +119,21 @@ public class CommunicationManager {
         }
     }
 
-    private void handleDownload(List<String> words, PrintWriter writer) {
-        if (words.size() < 3) {
-            writer.println("Применение: download <remote> <local> [continue]");
+    private void handleDownload(String command, List<String> words, PrintWriter writer) {
+        if (words.size() < 2) {
+            writer.println("Применение: download <remote> [local] [continue]");
             return;
+        }
+        String response = client.sendAndWait(command);
+        String localFileName = words.size() > 2? words.get(2) : words.get(1);
+        if (response != null && !response.isEmpty()) {
+            writer.println(response);
         }
         boolean resume = words.size() > 3 && "continue".equalsIgnoreCase(words.get(3));
         try {
             String line = client.readline();
             if ("Accept".equals(line)) {
-                client.downloadFile(words.get(1), words.get(2), resume);
+                client.downloadFile(words.get(1), localFileName, resume);
             } else {
                 writer.println(line);
             }
@@ -137,9 +144,9 @@ public class CommunicationManager {
 
     private void showMainHelp(PrintWriter writer) {
         writer.println("Доступные команды:");
-        writer.println("connect <host> [port] - Подключиться к серверу");
-        writer.println("exit                  - Выйти из программы");
-        writer.println("help                  - Окно помощи");
+        writer.println("\tconnect <host> [port] - Подключиться к серверу");
+        writer.println("\texit                  - Выйти из программы");
+        writer.println("\thelp                  - Окно помощи");
     }
 
     static class CommandCompleter implements Completer {
