@@ -1,19 +1,16 @@
 package client;
 
-import java.util.Scanner;
+import org.jline.reader.LineReader;
+import org.jline.reader.LineReaderBuilder;
+import org.jline.reader.impl.DefaultParser;
+import org.jline.reader.impl.history.DefaultHistory;
+import org.jline.terminal.Terminal;
+import org.jline.terminal.TerminalBuilder;
+
+import java.io.IOException;
 
 public class Main {
-    public static void main(String[] args) {
-        String line;
-        Scanner scanner = new Scanner(System.in);
-        Client client = new Client();
-        while (true) {
-            System.out.print("Введите адрес сервера или `exit`:\n# ");
-            line = scanner.nextLine();
-            if (line.equalsIgnoreCase("exit")) {
-                return;
-            }
-            client.connect(line, 12345);
-        }
+    public static void main(String[] args) throws Exception {
+        new CommunicationManager(12345).run();
     }
 }
