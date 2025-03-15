@@ -5,11 +5,17 @@ import org.jline.reader.impl.DefaultParser;
 import org.jline.reader.impl.history.DefaultHistory;
 import org.jline.terminal.Terminal;
 import org.jline.terminal.TerminalBuilder;
+import status.Status;
+import util.Command;
 import util.Context;
+import util.Response;
 
 import java.io.IOException;
 import java.io.PrintWriter;
+import java.net.SocketException;
+import java.net.SocketTimeoutException;
 import java.util.List;
+import java.util.Objects;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
@@ -19,71 +25,82 @@ public class CommunicationManager {
     private String prompt = "> ";
     private volatile boolean toStop = false;
     private Client client;
-    private final int port;
+    private final int initPort;
+    private String serverAddress;
+    private int port;
+    private final static String fileDir = "trash/";
+    private PrintWriter writer;
+    private LineReader reader;
+    private Command lastDownload = null;
+    private Command lastUpload = null;
 
     public CommunicationManager(int port) {
-        this.port = port;
+        this.initPort = port;
     }
 
     public void run() throws Exception {
         try (Terminal terminal = TerminalBuilder.builder()
                 .system(true).build()) {
-            LineReader reader = LineReaderBuilder.builder()
+            writer = terminal.writer();
+            reader = LineReaderBuilder.builder()
                     .terminal(terminal)
                     .parser(new DefaultParser())
                     .completer(new CommandCompleter())
                     .history(new DefaultHistory())
                     .build();
             while (!toStop) {
+                String line;
                 try (var scheduler = Executors.newScheduledThreadPool(1)) {
                     if (client != null) {
                         scheduler.scheduleAtFixedRate(
                                 () -> client.checkHeartbeat(),
-                                0, Client.TIMEOUT/2, TimeUnit.MILLISECONDS
+                                Client.TIMEOUT / 2,
+                                Client.TIMEOUT / 2,
+                                TimeUnit.MILLISECONDS
                         );
                     }
 
-                    String line = reader.readLine(prompt);
+                    line = reader.readLine(prompt);
                     scheduler.shutdown();
-                    if (line == null) {
-                        return;
-                    }
-                    if (!line.isEmpty()) {
-                        ParsedLine parsed = reader.getParser().parse(line, 0);
-                        processLine(line, parsed, terminal.writer());
-                    }
+                }
+                if (line == null) {
+                    return;
+                }
+                if (!line.isEmpty()) {
+                    ParsedLine parsed = reader.getParser().parse(line, 0);
+                    processLine(line, parsed);
                 }
             }
         }
     }
 
-    private void processLine(String line, ParsedLine parsedLine, PrintWriter writer) {
+    private void processLine(String line, ParsedLine parsedLine) throws IOException {
         List<String> words = parsedLine.words();
         if (words.isEmpty()) return;
 
         try {
             switch (currentContext) {
-                case MAIN -> handleMainContext(words, writer);
-                case SERVER -> handleServerContext(line, words, writer);
+                case MAIN -> handleMainContext(words);
+                case SERVER -> handleServerContext(line, words);
             }
-        } catch (Exception e) {
+        } catch (NumberFormatException e) {
             writer.println("Ошибка обрабтки строки: " + e.getMessage());
         }
     }
 
-    private void handleMainContext(List<String> words, PrintWriter writer) {
+    private void handleMainContext(List<String> words) {
         switch (words.getFirst().toLowerCase()) {
             case "exit" -> toStop = true;
-            case "help" -> showMainHelp(writer);
-            case "connect" -> connectToServer(words, writer);
+            case "help" -> showMainHelp();
+            case "connect" -> connectToServer(words);
             default -> writer.println("Неизвестная команда");
         }
     }
 
-    private void handleServerContext(String line, List<String> words, PrintWriter writer) {
+    private void handleServerContext(String line, List<String> words) throws IOException {
         switch (words.getFirst().toLowerCase()) {
             case "close" -> {
-                String response = client.sendAndWait(line);
+                String response = sendCommand(line).message();
                 if (response != null && !response.isEmpty()) {
                     writer.println(response);
                 }
@@ -91,9 +108,11 @@ public class CommunicationManager {
                 currentContext = Context.MAIN;
                 prompt = "> ";
             }
-            case "download" -> handleDownload(line, words, writer);
+            case "download" -> handleDownload(line, words);
+            case "upload" -> handleUpload(line, words);
+            case "continue" -> handleContinue(words);
             default -> {
-                String response = client.sendAndWait(line);
+                String response = sendCommand(line).message();
                 if (response != null && !response.isEmpty()) {
                     writer.println(response);
                 }
@@ -101,48 +120,109 @@ public class CommunicationManager {
         }
     }
 
-    private void connectToServer(List<String> words, PrintWriter writer) {
+    private void handleContinue(List<String> words) throws IOException {
+        if (words.size() < 2) {
+            writer.println("Применение: continue <upload/download>");
+            return;
+        }
+        if ("download".equalsIgnoreCase(words.get(1))) {
+            if (lastDownload == null || !lastDownload.interrupted()) {
+                writer.println("Нет информации о прерванных предыдущих загрузках");
+                return;
+            }
+            String line = lastDownload.line() + " continue";
+            handleDownload(line, lastDownload.words());
+        } else if("upload".equalsIgnoreCase(words.get(1))) {
+            if (lastUpload == null || !lastUpload.interrupted()) {
+                writer.println("Нет информации о прерванных предыдущих выгрузках");
+                return;
+            }
+            String line = lastUpload.line() + " continue";
+            handleUpload(line, lastUpload.words());
+        }
+    }
+
+    private void connectToServer(List<String> words) {
         if (words.size() < 2) {
             writer.println("Применение: connect <host> [port]");
             return;
         }
 
         String ip = words.get(1);
-        int port = words.size() > 2 ? Integer.parseInt(words.get(2)) : this.port;
+        int port = words.size() > 2 ? Integer.parseInt(words.get(2)) : this.initPort;
         try {
-            client = new Client(ip, port, writer);
+            client = new Client(ip, port, writer, reader);
             client.connect();
             currentContext = Context.SERVER;
             prompt = ip + "> ";
+            this.serverAddress = ip;
+            this.port = port;
         } catch (IOException e) {
             writer.println("Невозможно подключиться к серверу: " + e.getMessage());
         }
     }
 
-    private void handleDownload(String command, List<String> words, PrintWriter writer) {
-        if (words.size() < 2) {
-            writer.println("Применение: download <remote> [local] [continue]");
+    private void handleDownload(String command, List<String> words) throws IOException {
+        if (words.size() < 3) {
+            writer.println("Применение: download <remote> <local> [continue]");
             return;
         }
-        String response = client.sendAndWait(command);
-        String localFileName = words.size() > 2? words.get(2) : words.get(1);
+        String response = sendCommand(command).message();
+        String localFileName = fileDir + words.get(2);
         if (response != null && !response.isEmpty()) {
             writer.println(response);
         }
         boolean resume = words.size() > 3 && "continue".equalsIgnoreCase(words.get(3));
         try {
-            String line = client.readline();
-            if ("Accept".equals(line)) {
+            String line = client.readLine();
+            if (Client.ACCEPT_MESSAGE.equals(line)) {
+                lastDownload = new Command(serverAddress, port, command, words);
                 client.downloadFile(words.get(1), localFileName, resume);
             } else {
                 writer.println(line);
             }
-        } catch (IOException e) {
-            writer.println("Download failed: " + e.getMessage());
+        } catch (SocketException e) {
+            lastDownload.setInterrupted(true);
+            writer.println("Не удалось загрузить файл: " + e.getMessage());
+            client.closeConnection();
+            client.closeConnection();
+            currentContext = Context.MAIN;
+            prompt = "> ";
         }
     }
 
-    private void showMainHelp(PrintWriter writer) {
+    private void handleUpload(String command, List<String> words) throws IOException {
+        if (words.size() < 3) {
+            writer.println("Применение: upload <remote> <local> [continue]");
+            return;
+        }
+        String response = sendCommand(command).message();
+        String localFileName = fileDir + words.get(2);
+        if (response != null && !response.isEmpty()) {
+            writer.println(response);
+        }
+        boolean resume = words.size() > 3 && "continue".equalsIgnoreCase(words.get(3));
+        try {
+            String line = client.readLine();
+            if (Client.ACCEPT_MESSAGE.equals(line)) {
+                lastUpload = new Command(serverAddress, port, command, words);
+                client.uploadFile(localFileName, resume);
+            } else {
+                writer.println(line);
+            }
+        } catch (Exception e) {
+            if (lastUpload != null) {
+                lastUpload.setInterrupted(true);
+            }
+            writer.println("Не удалось выгрузить файл: " + e.getMessage());
+            client.closeConnection();
+            client.closeConnection();
+            currentContext = Context.MAIN;
+            prompt = "> ";
+        }
+    }
+
+    private void showMainHelp() {
         writer.println("Доступные команды:");
         writer.println("\tconnect <host> [port] - Подключиться к серверу");
         writer.println("\texit                  - Выйти из программы");
@@ -162,4 +242,30 @@ public class CommunicationManager {
             }
         }
     }
+
+    private Response sendCommand(String command) throws IOException {
+        var response = new Response(Status.ERROR, "Неизвестная ошибка");
+        var resume = true;
+        while (resume) {
+            try {
+                response = client.sendAndWait(command);
+                resume = false;
+            } catch (SocketTimeoutException _) {
+                resume = handleTimeout("Нет ответа от сервера, отправить команду снова?");
+                if (!resume) {
+                    throw new IOException("Время ожидания истекло");
+                }
+            } catch (IOException e) {
+                response = new Response(Status.ERROR, e.getMessage());
+                break;
+            }
+        }
+        return response;
+    }
+
+    private boolean handleTimeout(String message) {
+        writer.println(message);
+        return Objects.equals(reader.readLine("(y/n) "), "y");
+    }
+
 }
