@@ -9,7 +9,7 @@ import java.io.*;
 import java.net.SocketTimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 
-public abstract class Client {
+public abstract class Client implements AutoCloseable {
     protected final String serverIp;
     protected final int serverPort;
 

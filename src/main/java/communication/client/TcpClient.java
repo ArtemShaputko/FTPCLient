@@ -52,4 +52,8 @@ public class TcpClient extends Client {
         }
     }
 
+    @Override
+    public void close() throws Exception {
+        closeConnection();
+    }
 }

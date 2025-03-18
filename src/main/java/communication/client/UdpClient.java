@@ -11,7 +11,7 @@ import java.nio.charset.StandardCharsets;
 public class UdpClient extends Client {
     private DatagramSocket socket;
     int bufferSize;
-    public static final String CONNECT_REQUEST =  Status.CONNECT.code() + " CONNECT";
+    public static final String CONNECT_REQUEST = Status.CONNECT.code() + " CONNECT";
 
 
     public UdpClient(String ip, int port, PrintWriter consoleWriter, LineReader consoleReader, int bufferSize) {
@@ -34,8 +34,7 @@ public class UdpClient extends Client {
                 do {
                     writeMessage(CONNECT_REQUEST);
                     numTry++;
-                } while(!Client.ACCEPT_MESSAGE.equals(readLine()));
-                readLine();
+                } while (!Client.ACCEPT_MESSAGE.equals(readLine()));
                 writeMessage(Client.ACCEPT_MESSAGE);
                 break;
             } catch (SocketTimeoutException e) {
@@ -43,14 +42,14 @@ public class UdpClient extends Client {
                 numTry++;
             }
         }
-        if(numTry > 2) {
+        if (numTry > 2) {
             throw new SocketException("Нет ответа от сервера");
         }
     }
 
     @Override
     public void writeMessage(String message) throws IOException {
-        var packet = (message + "\n").getBytes(StandardCharsets.UTF_8);
+        var packet = (message).getBytes(StandardCharsets.UTF_8);
         var datagram = new DatagramPacket(packet, packet.length, InetAddress.getByName(serverIp), serverPort);
         socket.send(datagram);
     }
@@ -71,6 +70,14 @@ public class UdpClient extends Client {
 
     @Override
     public void closeConnection() {
+        isConnected.set(false);
+        if (socket != null && !socket.isClosed()) {
+            socket.close();
+        }
+    }
 
+    @Override
+    public void close() throws Exception {
+        closeConnection();
     }
 }
