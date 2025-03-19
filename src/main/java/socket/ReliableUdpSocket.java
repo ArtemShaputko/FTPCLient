@@ -1,72 +1,63 @@
 package socket;
 
 import java.io.*;
-import java.net.DatagramPacket;
-import java.net.DatagramSocket;
-import java.net.InetAddress;
-import java.net.SocketException;
+import java.net.*;
+import java.nio.BufferUnderflowException;
+import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
-import java.util.Arrays;
-import java.util.Iterator;
-import java.util.Map;
+import java.util.*;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicInteger;
 
-public class ReliableUdpSocket implements AutoCloseable{
-    private static final int TIMEOUT_MS = 1000;
+public class ReliableUdpSocket implements AutoCloseable {
+    private static final int RETRY_TIMEOUT_MS = 1000;
     private static final int MAX_RETRIES = 5;
     private static final int WINDOW_SIZE = 5;
+    private static final int MAX_SEQUENCE = Integer.MAX_VALUE;
 
     private final DatagramSocket socket;
     private final ScheduledExecutorService scheduler;
-    private final Map<Integer, PacketInfo> pendingPackets;
+    private final Map<Integer, PacketInfo> pendingPackets = new ConcurrentHashMap<>();
     private final BlockingQueue<Message> receivedQueue = new LinkedBlockingQueue<>();
+    private final TreeMap<Integer, Message> orderedBuffer = new TreeMap<>();
+    private final AtomicInteger expectedSeqNumber = new AtomicInteger(0);
 
+    private int soTimeout = 0;
     private int packetSize = 65507;
-    private int nextSeqNumber = 0;
-    private int lastAcked = -1;
+    private final AtomicInteger nextSeqNumber = new AtomicInteger(0);
+    private final AtomicInteger lastAcked = new AtomicInteger(-1);
 
-
-    public int getPacketSize() {
-        return packetSize;
-    }
-
-    public void setPacketSize(int packetSize) throws IOException{
-        if(packetSize > 65507 || packetSize < 0) {
-            throw new IOException("Packet size must be between 0 and 65507");
+    public void setSoTimeout(int soTimeout) {
+        if (soTimeout > 0) {
+            this.soTimeout = soTimeout;
         }
-        this.packetSize = packetSize;
     }
 
-    // Структура для хранения информации о пакете
     private static class PacketInfo {
-        byte[] data;
+        final byte[] data;
+        final InetAddress address;
+        final int port;
         int retries;
         long lastSentTime;
-        InetAddress address;
-        int port;
 
         PacketInfo(byte[] data, InetAddress address, int port) {
             this.data = data;
-            this.retries = 0;
-            this.lastSentTime = System.currentTimeMillis();
             this.address = address;
             this.port = port;
+            this.retries = 0;
+            this.lastSentTime = System.currentTimeMillis();
         }
     }
 
-    // Структура пакета с последовательным номером и флагом ACK
-    private static class Packet implements Serializable {
-        int sequenceNumber;
-        byte[] data;
-        boolean isAck;
-    }
+    private record Packet(int sequenceNumber, byte[] data, boolean isAck) {}
 
     public ReliableUdpSocket(int port, int packetSize) throws SocketException {
+        if (packetSize < 1 || packetSize > 65507) {
+            throw new IllegalArgumentException("Invalid packet size");
+        }
         this.packetSize = packetSize;
         this.socket = new DatagramSocket(port);
         this.scheduler = Executors.newScheduledThreadPool(2);
-        this.pendingPackets = new ConcurrentHashMap<>();
-
         startReceiverThread();
         startRetryChecker();
     }
@@ -83,38 +74,76 @@ public class ReliableUdpSocket implements AutoCloseable{
             while (!scheduler.isShutdown()) {
                 try {
                     socket.receive(packet);
-                    Packet received = deserialize(
-                            Arrays.copyOf(packet.getData(), packet.getLength()) // Фиксим длину
-                    );
-
-                    if (received.isAck) {
-                        handleAck(received.sequenceNumber);
-                    } else {
-                        sendAck(received.sequenceNumber, packet.getAddress(), packet.getPort());
-
-                        // Сохраняем только реальные данные и длину
-                        receivedQueue.put(new Message(
-                                Arrays.copyOf(received.data, received.data.length), // Копируем актуальные данные
-                                packet.getAddress(),
-                                packet.getPort(),
-                                received.data.length
-                        ));
-                    }
+                    processPacket(packet);
                 } catch (Exception e) {
                     if (!socket.isClosed()) {
-                        System.out.println("Receive error "+ e);
+                        System.out.println("Receive error " + e);
                     }
                 }
             }
         });
     }
 
-    public Message receive(int timeout) throws InterruptedException {
-        return receivedQueue.poll(timeout, TimeUnit.MILLISECONDS);
+    private void processPacket(DatagramPacket udpPacket) throws IOException {
+        Packet packet = deserialize(Arrays.copyOf(udpPacket.getData(), udpPacket.getLength()));
+
+        if (packet.isAck()) {
+            handleAck(packet.sequenceNumber());
+        } else {
+            handleDataPacket(packet, udpPacket.getAddress(), udpPacket.getPort());
+        }
     }
 
-    public Message receive() throws InterruptedException {
-        return receivedQueue.take();
+    private void handleDataPacket(Packet packet, InetAddress senderAddress, int senderPort) throws IOException {
+        sendAck(packet.sequenceNumber(), senderAddress, senderPort);
+        bufferAndOrderPackets(packet, senderAddress, senderPort);
+    }
+
+    private synchronized void bufferAndOrderPackets(Packet packet, InetAddress address, int port) {
+        int seq = packet.sequenceNumber();
+        byte[] data = Arrays.copyOf(packet.data(), packet.data().length);
+
+        orderedBuffer.put(seq, new Message(data, address, port, data.length));
+
+        while (!orderedBuffer.isEmpty()) {
+            int firstKey = orderedBuffer.firstKey();
+            if (firstKey == expectedSeqNumber.get()) {
+                Message msg = orderedBuffer.remove(firstKey);
+                receivedQueue.add(msg);
+                expectedSeqNumber.set(incrementSequence(firstKey));
+            } else if (firstKey > expectedSeqNumber.get()) {
+                break;
+            } else {
+                orderedBuffer.remove(firstKey);
+            }
+        }
+    }
+
+    private int incrementSequence(int seq) {
+        return (seq == MAX_SEQUENCE) ? 0 : seq + 1;
+    }
+
+    public Message receive(int timeout) throws SocketTimeoutException {
+        try {
+            var receive = receivedQueue.poll(timeout, TimeUnit.MILLISECONDS);
+            if (receive == null) {
+                throw new SocketTimeoutException("Socket timeout");
+            }
+            return receive;
+        } catch (InterruptedException e) {
+            throw new SocketTimeoutException("Socket timeout " + e.getMessage());
+        }
+    }
+
+    public Message receive() throws SocketTimeoutException {
+        try {
+            if(soTimeout > 0) {
+                return receive(soTimeout);
+            }
+            return receivedQueue.take();
+        } catch (InterruptedException e) {
+            throw new SocketTimeoutException("Socket timeout");
+        }
     }
 
     private void startRetryChecker() {
@@ -127,7 +156,7 @@ public class ReliableUdpSocket implements AutoCloseable{
                     Map.Entry<Integer, PacketInfo> entry = it.next();
                     PacketInfo info = entry.getValue();
 
-                    if (now - info.lastSentTime > TIMEOUT_MS) {
+                    if (now - info.lastSentTime > RETRY_TIMEOUT_MS) {
                         if (info.retries >= MAX_RETRIES) {
                             it.remove();
                         } else {
@@ -136,30 +165,32 @@ public class ReliableUdpSocket implements AutoCloseable{
                     }
                 }
             }
-        }, TIMEOUT_MS, TIMEOUT_MS, TimeUnit.MILLISECONDS);
+        }, RETRY_TIMEOUT_MS, RETRY_TIMEOUT_MS, TimeUnit.MILLISECONDS);
     }
 
     public void send(byte[] data, InetAddress address, int port) throws IOException {
         synchronized (pendingPackets) {
-            while (nextSeqNumber - lastAcked > WINDOW_SIZE) {
+            while (nextSeqNumber.get() - lastAcked.get() > WINDOW_SIZE) {
                 try {
                     Thread.sleep(100);
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
+                    throw new SocketTimeoutException("Interrupted during send " + e.getMessage());
                 }
             }
+            int currentSeq = nextSeqNumber.get();
+            try {
+                Packet packet = new Packet(currentSeq, data, false);
+                byte[] bytes = serialize(packet);
+                DatagramPacket dp = new DatagramPacket(bytes, bytes.length, address, port);
 
-            Packet packet = new Packet();
-            packet.sequenceNumber = nextSeqNumber;
-            packet.data = data;
-            packet.isAck = false;
-
-            byte[] bytes = serialize(packet);
-            DatagramPacket dp = new DatagramPacket(bytes, bytes.length, address, port);
-
-            pendingPackets.put(nextSeqNumber, new PacketInfo(bytes, address, port));
-            socket.send(dp);
-            nextSeqNumber++;
+                pendingPackets.put(currentSeq, new PacketInfo(bytes, address, port));
+                socket.send(dp);
+                nextSeqNumber.set(incrementSequence(currentSeq));
+            } catch (IOException e) {
+                pendingPackets.remove(currentSeq); // Удаляем неудавшийся пакет
+                throw e;
+            }
         }
     }
 
@@ -177,9 +208,8 @@ public class ReliableUdpSocket implements AutoCloseable{
             info.lastSentTime = System.currentTimeMillis();
 
         } catch (IOException e) {
-            System.out.println("Failed to resend packet [seq=" + seqNumber+"]: " + e.getMessage());
+            System.out.println("Failed to resend packet [seq="+ seqNumber+"]: "+ e.getMessage());
 
-            // При критической ошибке можно удалить пакет из очереди
             if (info.retries >= MAX_RETRIES) {
                 synchronized (pendingPackets) {
                     pendingPackets.remove(seqNumber);
@@ -190,37 +220,46 @@ public class ReliableUdpSocket implements AutoCloseable{
 
     private void handleAck(int ackNumber) {
         synchronized (pendingPackets) {
-            if (ackNumber > lastAcked) {
-                lastAcked = ackNumber;
+            if (ackNumber > lastAcked.get()) {
+                lastAcked.set(ackNumber);
                 pendingPackets.keySet().removeIf(seq -> seq <= ackNumber);
             }
         }
     }
 
     private void sendAck(int seqNumber, InetAddress senderAddress, int senderPort) throws IOException {
-        Packet ack = new Packet();
-        ack.sequenceNumber = seqNumber;
-        ack.isAck = true;
-
+        // Создаем пакет с пустым data
+        Packet ack = new Packet(seqNumber, new byte[0], true);
         byte[] bytes = serialize(ack);
         DatagramPacket dp = new DatagramPacket(bytes, bytes.length, senderAddress, senderPort);
         socket.send(dp);
     }
 
     private byte[] serialize(Packet packet) throws IOException {
-        try (ByteArrayOutputStream bos = new ByteArrayOutputStream();
-             ObjectOutputStream oos = new ObjectOutputStream(bos)) {
-            oos.writeObject(packet);
-            return bos.toByteArray();
-        }
+        ByteBuffer buffer = ByteBuffer.allocate(13 + packet.data().length);
+        buffer.putInt(packet.sequenceNumber());
+        buffer.put(packet.isAck() ? (byte)1 : (byte)0);
+        buffer.putInt(packet.data().length);
+        buffer.put(packet.data());
+        return buffer.array();
     }
 
-    private Packet deserialize(byte[] data) throws IOException {
-        try (ByteArrayInputStream bis = new ByteArrayInputStream(data);
-             ObjectInputStream ois = new ObjectInputStream(bis)) {
-            return (Packet) ois.readObject();
-        } catch (ClassNotFoundException e) {
-            throw new IOException("Deserialization error", e);
+    private Packet deserialize(byte[] rawData) throws IOException {
+        try {
+            ByteBuffer buffer = ByteBuffer.wrap(rawData);
+            int sequenceNumber = buffer.getInt();
+            boolean isAck = buffer.get() == 1;
+            int dataLength = buffer.getInt();
+
+            if (dataLength < 0 || dataLength > buffer.remaining()) {
+                throw new IOException("Invalid packet length");
+            }
+
+            byte[] data = new byte[dataLength];
+            buffer.get(data);
+            return new Packet(sequenceNumber, data, isAck);
+        } catch (BufferUnderflowException e) {
+            throw new IOException("Malformed packet", e);
         }
     }
 

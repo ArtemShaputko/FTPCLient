@@ -1,6 +1,6 @@
 package communication.client;
 
-import download.Downloader;
+import download.TcpDownloader;
 import org.jline.reader.LineReader;
 
 import java.io.BufferedReader;
@@ -27,7 +27,7 @@ public class TcpClient extends Client {
         isConnected.set(true);
         socketWriter = new PrintWriter(socket.getOutputStream(), true);
         socketReader = new BufferedReader(new InputStreamReader(socket.getInputStream()));
-        downloader = new Downloader(socket, consoleWriter, consoleReader);
+        downloader = new TcpDownloader(socket, consoleWriter, consoleReader);
     }
 
     @Override

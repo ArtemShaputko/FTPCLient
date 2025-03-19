@@ -1,5 +1,6 @@
 package communication.client;
 
+import download.UdpDownloader;
 import org.jline.reader.LineReader;
 import socket.ReliableUdpSocket;
 import status.Status;
@@ -7,12 +8,11 @@ import status.Status;
 import java.io.IOException;
 import java.io.PrintWriter;
 import java.net.*;
-import java.nio.charset.StandardCharsets;
 
 public class UdpClient extends Client {
     private ReliableUdpSocket socket;
     int bufferSize;
-    public static final String CONNECT_REQUEST =  Status.CONNECT.code() + " CONNECT";
+    public static final String CONNECT_REQUEST = Status.CONNECT.code() + " CONNECT";
 
 
     public UdpClient(String ip, int port, PrintWriter consoleWriter, LineReader consoleReader, int bufferSize) {
@@ -23,30 +23,10 @@ public class UdpClient extends Client {
     @Override
     public void connect() throws IOException {
         socket = new ReliableUdpSocket(11111, bufferSize);
-        establishConnection();
-        socket.send("", InetAddress.getByName(serverIp), serverPort);
+        socket.setSoTimeout(Client.TIMEOUT);
+        socket.send(CONNECT_REQUEST, InetAddress.getByName(serverIp), serverPort);
         isConnected.set(true);
-    }
-
-    private void establishConnection() throws IOException {
-        int numTry = 0;
-        while (numTry < 3) {
-            try {
-                do {
-                    writeMessage(CONNECT_REQUEST);
-                    numTry++;
-                } while(!Client.ACCEPT_MESSAGE.equals(readLine()));
-                readLine();
-                writeMessage(Client.ACCEPT_MESSAGE);
-                break;
-            } catch (SocketTimeoutException e) {
-                consoleWriter.println("Нет ответа от сервера, подключаюсь ещё раз");
-                numTry++;
-            }
-        }
-        if(numTry > 2) {
-            throw new SocketException("Нет ответа от сервера");
-        }
+        downloader = new UdpDownloader(socket,consoleWriter,consoleReader,InetAddress.getByName(serverIp), serverPort);
     }
 
     @Override
@@ -56,11 +36,7 @@ public class UdpClient extends Client {
 
     @Override
     public String readLine() throws IOException {
-        try {
-            return socket.receive().text();
-        } catch (InterruptedException e) {
-            throw new SocketTimeoutException(e.getMessage());
-        }
+        return socket.receive().text();
     }
 
     @Override
