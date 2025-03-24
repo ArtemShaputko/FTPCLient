@@ -1,27 +1,51 @@
 package communication.client;
 
 import org.jline.reader.LineReader;
+import status.Status;
 
 import java.io.IOException;
 import java.io.PrintWriter;
 import java.net.*;
 import java.nio.charset.StandardCharsets;
 
-public class UdpClient extends Client{
+public class UdpClient extends Client {
     private DatagramSocket socket;
-    private final byte[] buffer;
+    int bufferSize;
+    public static final String CONNECT_REQUEST =  Status.CONNECT.code() + " CONNECT";
+
+
     public UdpClient(String ip, int port, PrintWriter consoleWriter, LineReader consoleReader, int bufferSize) {
         super(ip, port, consoleWriter, consoleReader);
-        buffer = new byte[bufferSize];
+        this.bufferSize = bufferSize;
     }
 
     @Override
     public void connect() throws IOException {
         socket = new DatagramSocket(11111);
         socket.setSoTimeout(TIMEOUT);
-        var datagram = new DatagramPacket(buffer, buffer.length, InetAddress.getByName(serverIp), serverPort);
-        socket.send(datagram);
+        establishConnection();
         isConnected.set(true);
+    }
+
+    private void establishConnection() throws IOException {
+        int numTry = 0;
+        while (numTry < 3) {
+            try {
+                do {
+                    writeMessage(CONNECT_REQUEST);
+                    numTry++;
+                } while(!Client.ACCEPT_MESSAGE.equals(readLine()));
+                readLine();
+                writeMessage(Client.ACCEPT_MESSAGE);
+                break;
+            } catch (SocketTimeoutException e) {
+                consoleWriter.println("Нет ответа от сервера, подключаюсь ещё раз");
+                numTry++;
+            }
+        }
+        if(numTry > 2) {
+            throw new SocketException("Нет ответа от сервера");
+        }
     }
 
     @Override
@@ -33,15 +57,16 @@ public class UdpClient extends Client{
 
     @Override
     public String readLine() throws IOException {
+        var buffer = new byte[bufferSize];
         DatagramPacket packet = new DatagramPacket(buffer, buffer.length);
         socket.receive(packet);
-
-        return new String(
+        var str = new String(
                 packet.getData(),
                 0,
                 packet.getLength(),
                 StandardCharsets.UTF_8
-        ).split("\n")[0];
+        );
+        return str;
     }
 
     @Override

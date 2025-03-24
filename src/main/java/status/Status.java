@@ -5,7 +5,8 @@ public enum Status {
     END(300, "End of response"),
     ERROR(400, "Error"),
     UNKNOWN(-1, "Unknown status"),
-    NO_END(-300, "No end of response");
+    NO_END(-300, "No end of response"),
+    CONNECT(100, "Request to connect");
 
     private final int code;
     private final String description;
