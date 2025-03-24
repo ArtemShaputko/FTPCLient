@@ -26,7 +26,8 @@ public class UdpClient extends Client{
 
     @Override
     public void writeMessage(String message) throws IOException {
-        var datagram = new DatagramPacket(buffer, buffer.length, InetAddress.getByName(serverIp), serverPort);
+        var packet = (message + "\n").getBytes(StandardCharsets.UTF_8);
+        var datagram = new DatagramPacket(packet, packet.length, InetAddress.getByName(serverIp), serverPort);
         socket.send(datagram);
     }
 
