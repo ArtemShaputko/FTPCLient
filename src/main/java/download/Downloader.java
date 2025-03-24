@@ -1,13 +1,11 @@
-package client;
+package download;
 
+import communication.client.Client;
 import me.tongfei.progressbar.ProgressBar;
 import me.tongfei.progressbar.ProgressBarBuilder;
 import org.jline.reader.LineReader;
-import status.Status;
-import util.Response;
 
 import java.io.*;
-import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.net.SocketException;
 import java.net.SocketTimeoutException;
@@ -17,87 +15,15 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.concurrent.*;
-import java.util.concurrent.atomic.AtomicBoolean;
 
-class Client {
-    private final String serverIp;
-    private final int port;
-    private final PrintWriter consoleWriter;
-    private final LineReader consoleReader;
-    private Socket socket;
-    private final AtomicBoolean isConnected = new AtomicBoolean(false);
-
-    public static final int TIMEOUT = 60_000;
-    public static final String HEARTBEAT_REQUEST = "PING";
-    public static final String HEARTBEAT_RESPONSE = "PONG";
-    public static final String ACCEPT_MESSAGE = Status.SUCCESS.code() + " ACCEPT";
-    public static final String END_MESSAGE = Status.END.code() + " END";
-
-    public Client(String ip, int port, PrintWriter consoleWriter, LineReader consoleReader) {
-        this.serverIp = ip;
-        this.port = port;
+public class Downloader {
+    Socket socket;
+    PrintWriter consoleWriter;
+    LineReader consoleReader;
+    public Downloader(Socket socket, PrintWriter consoleWriter, LineReader consoleReader) {
+        this.socket = socket;
         this.consoleWriter = consoleWriter;
         this.consoleReader = consoleReader;
-    }
-
-    public void connect() throws IOException {
-        socket = new Socket();
-        socket.connect(new InetSocketAddress(serverIp, port), TIMEOUT);
-        socket.setSoTimeout(TIMEOUT);
-        socket.setKeepAlive(true);
-        isConnected.set(true);
-    }
-
-    public Response sendAndWait(String message) throws IOException {
-        PrintWriter out = new PrintWriter(socket.getOutputStream(), true);
-        out.println(message);
-
-        BufferedReader in = new BufferedReader(new InputStreamReader(socket.getInputStream()));
-        StringBuilder responseBuilder = new StringBuilder();
-        String line;
-        try {
-            while ((line = in.readLine()) != null) {
-                if (END_MESSAGE.equals(line)) {
-                    break;
-                } else if (HEARTBEAT_REQUEST.equals(line)) {
-                    out.println(HEARTBEAT_RESPONSE);
-                } else if (!HEARTBEAT_RESPONSE.equals(line)) {
-                    responseBuilder.append(line).append("\n");
-                }
-            }
-        } catch (SocketTimeoutException e) {
-            if (!responseBuilder.isEmpty()) {
-                String responseMessage = responseBuilder.toString().trim();
-                return new Response(Status.NO_END, responseMessage.split(" ", 2)[1]);
-            }
-            throw e;
-        }
-        return parseResponse(responseBuilder.toString().trim());
-    }
-
-    public static Response parseResponse(String message) {
-        if (message.isEmpty()) {
-            return new Response(Status.SUCCESS, "");
-        }
-        var responseArray = message.split(" ", 2);
-        int code = Integer.parseInt(responseArray[0]);
-        return new Response(Status.getStatusFromCode(code), responseArray[1]);
-    }
-
-    public String readLine() throws IOException {
-        BufferedReader in = new BufferedReader(new InputStreamReader(socket.getInputStream()));
-        return in.readLine();
-    }
-
-    public void checkHeartbeat() {
-        try {
-            if (isConnected.get()) {
-                PrintWriter out = new PrintWriter(socket.getOutputStream(), true);
-                out.println(HEARTBEAT_REQUEST);
-            }
-        } catch (IOException e) {
-            consoleWriter.println("Ошибка приёма сообщения: " + e.getMessage());
-        }
     }
 
     public void downloadFile(String remotePath, String localPath, boolean resume) throws IOException {
@@ -151,7 +77,7 @@ class Client {
         ByteBuffer buffer = ByteBuffer.allocate(8192);
         long received = 0;
         int read;
-        while (received < sizeToReceive && isConnected.get()) {
+        while (received < sizeToReceive) {
             try {
                 read = is.read(buffer.array());
             } catch (SocketTimeoutException e) {
@@ -210,7 +136,7 @@ class Client {
                         }
                     });
                     try {
-                        writeFuture.get(TIMEOUT, TimeUnit.MILLISECONDS);
+                        writeFuture.get(Client.TIMEOUT, TimeUnit.MILLISECONDS);
                         pb.stepBy(bytesRead);
                     } catch (TimeoutException e) {
                         writeFuture.cancel(true);
@@ -226,17 +152,6 @@ class Client {
             throw new CompletionException(cause);
         }finally {
             dos.flush();
-        }
-    }
-
-    public void closeConnection() {
-        isConnected.set(false);
-        try {
-            if (socket != null && !socket.isClosed()) {
-                socket.close();
-            }
-        } catch (IOException e) {
-            consoleWriter.println("Ошибка закрытия соединения: " + e.getMessage());
         }
     }
 }

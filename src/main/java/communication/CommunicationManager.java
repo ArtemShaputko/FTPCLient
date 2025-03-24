@@ -1,5 +1,7 @@
-package client;
+package communication;
 
+import communication.client.Client;
+import communication.client.UdpClient;
 import org.jline.reader.*;
 import org.jline.reader.impl.DefaultParser;
 import org.jline.reader.impl.history.DefaultHistory;
@@ -151,7 +153,7 @@ public class CommunicationManager {
         String ip = words.get(1);
         int port = words.size() > 2 ? Integer.parseInt(words.get(2)) : this.initPort;
         try {
-            client = new Client(ip, port, writer, reader);
+            client = new UdpClient(ip, port, writer, reader, 1024);
             client.connect();
             currentContext = Context.SERVER;
             prompt = ip + "> ";
