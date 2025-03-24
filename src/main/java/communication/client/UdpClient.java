@@ -41,7 +41,7 @@ public class UdpClient extends Client{
                 0,
                 packet.getLength(),
                 StandardCharsets.UTF_8
-        );
+        ).split("\n")[0];
     }
 
     @Override
