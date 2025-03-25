@@ -1,15 +1,15 @@
 package communication.client;
 
 import org.jline.reader.LineReader;
+import socket.ReliableUdpSocket;
 import status.Status;
 
 import java.io.IOException;
 import java.io.PrintWriter;
 import java.net.*;
-import java.nio.charset.StandardCharsets;
 
 public class UdpClient extends Client {
-    private DatagramSocket socket;
+    private ReliableUdpSocket socket;
     int bufferSize;
     public static final String CONNECT_REQUEST =  Status.CONNECT.code() + " CONNECT";
 
@@ -21,9 +21,9 @@ public class UdpClient extends Client {
 
     @Override
     public void connect() throws IOException {
-        socket = new DatagramSocket(11111);
-        socket.setSoTimeout(TIMEOUT);
+        socket = new ReliableUdpSocket(11111, bufferSize);
         establishConnection();
+        socket.send("", InetAddress.getByName(serverIp), serverPort);
         isConnected.set(true);
     }
 
@@ -50,27 +50,20 @@ public class UdpClient extends Client {
 
     @Override
     public void writeMessage(String message) throws IOException {
-        var packet = (message + "\n").getBytes(StandardCharsets.UTF_8);
-        var datagram = new DatagramPacket(packet, packet.length, InetAddress.getByName(serverIp), serverPort);
-        socket.send(datagram);
+        socket.send(message, InetAddress.getByName(serverIp), serverPort);
     }
 
     @Override
     public String readLine() throws IOException {
-        var buffer = new byte[bufferSize];
-        DatagramPacket packet = new DatagramPacket(buffer, buffer.length);
-        socket.receive(packet);
-        var str = new String(
-                packet.getData(),
-                0,
-                packet.getLength(),
-                StandardCharsets.UTF_8
-        );
-        return str;
+        try {
+            return socket.receive().text();
+        } catch (InterruptedException e) {
+            throw new SocketTimeoutException(e.getMessage());
+        }
     }
 
     @Override
     public void closeConnection() {
-
+        socket.close();
     }
 }
