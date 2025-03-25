@@ -7,6 +7,7 @@ import status.Status;
 import java.io.IOException;
 import java.io.PrintWriter;
 import java.net.*;
+import java.nio.charset.StandardCharsets;
 
 public class UdpClient extends Client {
     private ReliableUdpSocket socket;
@@ -64,6 +65,14 @@ public class UdpClient extends Client {
 
     @Override
     public void closeConnection() {
-        socket.close();
+        isConnected.set(false);
+        if (socket != null) {
+            socket.close();
+        }
+    }
+
+    @Override
+    public void close() throws Exception {
+        closeConnection();
     }
 }

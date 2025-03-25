@@ -22,7 +22,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
 
-public class CommunicationManager {
+public class CommunicationManager implements AutoCloseable{
     private Context currentContext = Context.MAIN;
     private String prompt = "> ";
     private volatile boolean toStop = false;
@@ -218,7 +218,6 @@ public class CommunicationManager {
             }
             writer.println("Не удалось выгрузить файл: " + e.getMessage());
             client.closeConnection();
-            client.closeConnection();
             currentContext = Context.MAIN;
             prompt = "> ";
         }
@@ -229,6 +228,13 @@ public class CommunicationManager {
         writer.println("\tconnect <host> [port] - Подключиться к серверу");
         writer.println("\texit                  - Выйти из программы");
         writer.println("\thelp                  - Окно помощи");
+    }
+
+    @Override
+    public void close() throws Exception {
+        if(client!=null) {
+            client.close();
+        }
     }
 
     static class CommandCompleter implements Completer {
