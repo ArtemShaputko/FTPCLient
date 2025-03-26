@@ -1,5 +1,8 @@
 package socket;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import java.io.*;
 import java.net.*;
 import java.nio.BufferUnderflowException;
@@ -8,9 +11,11 @@ import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.locks.LockSupport;
 
 public class ReliableUdpSocket implements AutoCloseable {
-    private static final int RETRY_TIMEOUT_MS = 1000;
+    private static final Logger logger = LoggerFactory.getLogger(ReliableUdpSocket.class);
+    private static final int BASE_RETRY_TIMEOUT_MS = 1000;
     private static final int MAX_RETRIES = 5;
     private static final int WINDOW_SIZE = 5;
     private static final int MAX_SEQUENCE = Integer.MAX_VALUE;
@@ -20,18 +25,15 @@ public class ReliableUdpSocket implements AutoCloseable {
     private final Map<Integer, PacketInfo> pendingPackets = new ConcurrentHashMap<>();
     private final BlockingQueue<Message> receivedQueue = new LinkedBlockingQueue<>();
     private final TreeMap<Integer, Message> orderedBuffer = new TreeMap<>();
-    private final AtomicInteger expectedSeqNumber = new AtomicInteger(0);
+    private final ConcurrentSkipListSet<Integer> receivedAcks = new ConcurrentSkipListSet<>();
+    private final BlockingQueue<SendTask> sendQueue = new LinkedBlockingQueue<>();
+    private final AtomicInteger windowAvailable = new AtomicInteger(WINDOW_SIZE);
 
     private int soTimeout = 0;
     private int packetSize = 65507;
     private final AtomicInteger nextSeqNumber = new AtomicInteger(0);
     private final AtomicInteger lastAcked = new AtomicInteger(-1);
-
-    public void setSoTimeout(int soTimeout) {
-        if (soTimeout > 0) {
-            this.soTimeout = soTimeout;
-        }
-    }
+    private final AtomicInteger expectedSeqNumber = new AtomicInteger(0);
 
     private static class PacketInfo {
         final byte[] data;
@@ -51,15 +53,18 @@ public class ReliableUdpSocket implements AutoCloseable {
 
     private record Packet(int sequenceNumber, byte[] data, boolean isAck) {}
 
+    private record SendTask(byte[] data, InetAddress address, int port) {}
+
     public ReliableUdpSocket(int port, int packetSize) throws SocketException {
         if (packetSize < 1 || packetSize > 65507) {
             throw new IllegalArgumentException("Invalid packet size");
         }
         this.packetSize = packetSize;
         this.socket = new DatagramSocket(port);
-        this.scheduler = Executors.newScheduledThreadPool(2);
+        this.scheduler = Executors.newScheduledThreadPool(3);
         startReceiverThread();
         startRetryChecker();
+        startSendWorker();
     }
 
     public ReliableUdpSocket(int port) throws SocketException {
@@ -77,7 +82,7 @@ public class ReliableUdpSocket implements AutoCloseable {
                     processPacket(packet);
                 } catch (Exception e) {
                     if (!socket.isClosed()) {
-                        System.out.println("Receive error " + e);
+                        logger.error("Receive error", e);
                     }
                 }
             }
@@ -119,79 +124,50 @@ public class ReliableUdpSocket implements AutoCloseable {
         }
     }
 
-    private int incrementSequence(int seq) {
-        return (seq == MAX_SEQUENCE) ? 0 : seq + 1;
-    }
+    private void startSendWorker() {
+        scheduler.execute(() -> {
+            while (!scheduler.isShutdown()) {
+                try {
+                    SendTask task = sendQueue.poll(100, TimeUnit.MILLISECONDS);
+                    if (task == null) continue;
 
-    public Message receive(int timeout) throws SocketTimeoutException {
-        try {
-            var receive = receivedQueue.poll(timeout, TimeUnit.MILLISECONDS);
-            if (receive == null) {
-                throw new SocketTimeoutException("Socket timeout");
-            }
-            return receive;
-        } catch (InterruptedException e) {
-            throw new SocketTimeoutException("Socket timeout " + e.getMessage());
-        }
-    }
+                    while (windowAvailable.get() <= 0) {
+                        LockSupport.parkNanos(1_000_000);
+                    }
 
-    public Message receive() throws SocketTimeoutException {
-        try {
-            if(soTimeout > 0) {
-                return receive(soTimeout);
+                    int currentSeq = nextSeqNumber.getAndIncrement();
+                    Packet packet = new Packet(currentSeq, task.data, false);
+                    byte[] bytes = serialize(packet);
+
+                    synchronized (pendingPackets) {
+                        pendingPackets.put(currentSeq, new PacketInfo(bytes, task.address, task.port));
+                        windowAvailable.decrementAndGet();
+                    }
+
+                    DatagramPacket dp = new DatagramPacket(bytes, bytes.length, task.address, task.port);
+                    socket.send(dp);
+                } catch (Exception e) {
+                    logger.error("Send worker error", e);
+                }
             }
-            return receivedQueue.take();
-        } catch (InterruptedException e) {
-            throw new SocketTimeoutException("Socket timeout");
-        }
+        });
     }
 
     private void startRetryChecker() {
         scheduler.scheduleAtFixedRate(() -> {
             long now = System.currentTimeMillis();
+            pendingPackets.forEach((seq, info) -> {
+                long elapsed = now - info.lastSentTime;
+                int timeout = BASE_RETRY_TIMEOUT_MS * (1 << info.retries);
 
-            synchronized (pendingPackets) {
-                Iterator<Map.Entry<Integer, PacketInfo>> it = pendingPackets.entrySet().iterator();
-                while (it.hasNext()) {
-                    Map.Entry<Integer, PacketInfo> entry = it.next();
-                    PacketInfo info = entry.getValue();
-
-                    if (now - info.lastSentTime > RETRY_TIMEOUT_MS) {
-                        if (info.retries >= MAX_RETRIES) {
-                            it.remove();
-                        } else {
-                            resendPacket(entry.getKey(), info);
-                        }
-                    }
+                if (elapsed > timeout && info.retries < MAX_RETRIES) {
+                    resendPacket(seq, info);
+                } else if (info.retries >= MAX_RETRIES) {
+                    pendingPackets.remove(seq);
+                    windowAvailable.incrementAndGet();
                 }
-            }
-        }, RETRY_TIMEOUT_MS, RETRY_TIMEOUT_MS, TimeUnit.MILLISECONDS);
-    }
-
-    public void send(byte[] data, InetAddress address, int port) throws IOException {
-        synchronized (pendingPackets) {
-            while (nextSeqNumber.get() - lastAcked.get() > WINDOW_SIZE) {
-                try {
-                    Thread.sleep(100);
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    throw new SocketTimeoutException("Interrupted during send " + e.getMessage());
-                }
-            }
-            int currentSeq = nextSeqNumber.get();
-            try {
-                Packet packet = new Packet(currentSeq, data, false);
-                byte[] bytes = serialize(packet);
-                DatagramPacket dp = new DatagramPacket(bytes, bytes.length, address, port);
-
-                pendingPackets.put(currentSeq, new PacketInfo(bytes, address, port));
-                socket.send(dp);
-                nextSeqNumber.set(incrementSequence(currentSeq));
-            } catch (IOException e) {
-                pendingPackets.remove(currentSeq); // Удаляем неудавшийся пакет
-                throw e;
-            }
-        }
+            });
+        }, 100, 100, TimeUnit.MILLISECONDS);
     }
 
     private void resendPacket(int seqNumber, PacketInfo info) {
@@ -199,36 +175,70 @@ public class ReliableUdpSocket implements AutoCloseable {
             DatagramPacket dp = new DatagramPacket(
                     info.data,
                     info.data.length,
-                    info.address,  // Используем сохраненный адрес
-                    info.port      // Используем сохраненный порт
+                    info.address,
+                    info.port
             );
 
             socket.send(dp);
             info.retries++;
             info.lastSentTime = System.currentTimeMillis();
-
+            logger.debug("Resent packet [seq={}, retry={}]", seqNumber, info.retries);
         } catch (IOException e) {
-            System.out.println("Failed to resend packet [seq="+ seqNumber+"]: "+ e.getMessage());
-
-            if (info.retries >= MAX_RETRIES) {
-                synchronized (pendingPackets) {
-                    pendingPackets.remove(seqNumber);
-                }
-            }
+            logger.error("Failed to resend packet [seq={}]: {}", seqNumber, e.getMessage());
         }
     }
 
     private void handleAck(int ackNumber) {
+        receivedAcks.add(ackNumber);
+        Integer first = receivedAcks.first();
+        int lastContinuous = first;
+
+        for (int seq : receivedAcks) {
+            if (seq != lastContinuous + 1) break;
+            lastContinuous = seq;
+        }
+
         synchronized (pendingPackets) {
-            if (ackNumber > lastAcked.get()) {
-                lastAcked.set(ackNumber);
-                pendingPackets.keySet().removeIf(seq -> seq <= ackNumber);
+            if (lastContinuous > lastAcked.get()) {
+                int delta = lastContinuous - lastAcked.get();
+                lastAcked.set(lastContinuous);
+                int finalLastContinuous = lastContinuous;
+                pendingPackets.keySet().removeIf(seq -> seq <= finalLastContinuous);
+                windowAvailable.addAndGet(delta);
+                receivedAcks.headSet(lastContinuous, true).clear();
             }
         }
     }
 
+    public void send(byte[] data, InetAddress address, int port) throws IOException {
+        try {
+            sendQueue.put(new SendTask(data, address, port));
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IOException("Interrupted during send", e);
+        }
+    }
+
+    public Message receive(int timeout) throws SocketTimeoutException {
+        try {
+            Message msg = receivedQueue.poll(timeout, TimeUnit.MILLISECONDS);
+            if (msg == null) throw new SocketTimeoutException("Receive timeout");
+            return msg;
+        } catch (InterruptedException e) {
+            throw new SocketTimeoutException("Interrupted during receive");
+        }
+    }
+
+    public Message receive() throws SocketTimeoutException {
+        try {
+            if (soTimeout > 0) return receive(soTimeout);
+            return receivedQueue.take();
+        } catch (InterruptedException e) {
+            throw new SocketTimeoutException("Interrupted during receive");
+        }
+    }
+
     private void sendAck(int seqNumber, InetAddress senderAddress, int senderPort) throws IOException {
-        // Создаем пакет с пустым data
         Packet ack = new Packet(seqNumber, new byte[0], true);
         byte[] bytes = serialize(ack);
         DatagramPacket dp = new DatagramPacket(bytes, bytes.length, senderAddress, senderPort);
@@ -263,6 +273,14 @@ public class ReliableUdpSocket implements AutoCloseable {
         }
     }
 
+    private int incrementSequence(int seq) {
+        return (seq == MAX_SEQUENCE) ? 0 : seq + 1;
+    }
+
+    public void setSoTimeout(int timeout) {
+        this.soTimeout = Math.max(timeout, 0);
+    }
+
     public void send(String message, InetAddress address, int port) throws IOException {
         send(message, StandardCharsets.UTF_8.name(), address, port);
     }
@@ -275,9 +293,17 @@ public class ReliableUdpSocket implements AutoCloseable {
             throw new IOException("Unsupported charset: " + charsetName, e);
         }
     }
+
     @Override
     public void close() {
         scheduler.shutdown();
         socket.close();
+        try {
+            if (!scheduler.awaitTermination(1, TimeUnit.SECONDS)) {
+                scheduler.shutdownNow();
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
     }
 }
