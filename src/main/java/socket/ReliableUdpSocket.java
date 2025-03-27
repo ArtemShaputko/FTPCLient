@@ -19,7 +19,6 @@ import java.util.concurrent.locks.ReentrantLock;
 public class ReliableUdpSocket implements AutoCloseable {
     private static final Logger logger = LoggerFactory.getLogger(ReliableUdpSocket.class);
     private static final int BASE_RETRY_TIMEOUT_MS = 1000;
-    private static final int MAX_RETRIES = 5;
     private static final int WINDOW_SIZE = 5;
     private static final int MAX_SEQUENCE = Integer.MAX_VALUE;
 
@@ -36,10 +35,16 @@ public class ReliableUdpSocket implements AutoCloseable {
     private final Condition windowNotFull = windowLock.newCondition();
 
     private int soTimeout = 0;
-    private int packetSize = 65507;
+    private int packetSize;
+    private final int payloadSize = packetSize - Packet.headerSize();
     private final AtomicInteger nextSeqNumber = new AtomicInteger(0);
     private final AtomicInteger lastAcked = new AtomicInteger(-1);
     private final AtomicInteger expectedSeqNumber = new AtomicInteger(0);
+
+
+    public int getPayloadSize() {
+        return payloadSize;
+    }
 
     private static class PacketInfo {
         final byte[] data;
@@ -57,12 +62,16 @@ public class ReliableUdpSocket implements AutoCloseable {
         }
     }
 
-    private record Packet(int sequenceNumber, byte[] data, boolean isAck) {}
+    private record Packet(boolean isAck, int sequenceNumber, byte[] data) {
+        public static int headerSize() {
+            return 2*Integer.BYTES + 1;
+        }
+    }
 
     private record SendTask(byte[] data, InetAddress address, int port) {}
 
     public ReliableUdpSocket(int port, int packetSize) throws SocketException {
-        if (packetSize < 1 || packetSize > 65507) {
+        if (packetSize <= Packet.headerSize() || packetSize > 65507) {
             throw new IllegalArgumentException("Invalid packet size");
         }
         this.packetSize = packetSize;
@@ -106,7 +115,9 @@ public class ReliableUdpSocket implements AutoCloseable {
     }
 
     private void handleDataPacket(Packet packet, InetAddress senderAddress, int senderPort) throws IOException {
-        sendAck(packet.sequenceNumber(), senderAddress, senderPort);
+        if(packet.sequenceNumber == expectedSeqNumber.get()) {
+            sendAck(packet.sequenceNumber(), senderAddress, senderPort);
+        }
         bufferAndOrderPackets(packet, senderAddress, senderPort);
     }
 
@@ -142,7 +153,7 @@ public class ReliableUdpSocket implements AutoCloseable {
                     }
 
                     int currentSeq = nextSeqNumber.getAndIncrement();
-                    Packet packet = new Packet(currentSeq, task.data, false);
+                    Packet packet = new Packet(false, currentSeq, task.data);
                     byte[] bytes = serialize(packet);
 
                     synchronized (pendingPackets) {
@@ -166,11 +177,8 @@ public class ReliableUdpSocket implements AutoCloseable {
                 long elapsed = now - info.lastSentTime;
                 int timeout = BASE_RETRY_TIMEOUT_MS * (1 << info.retries);
 
-                if (elapsed > timeout && info.retries < MAX_RETRIES) {
+                if (elapsed > timeout) {
                     resendPacket(seq, info);
-                } else if (info.retries >= MAX_RETRIES) {
-                    pendingPackets.remove(seq);
-                    windowAvailable.incrementAndGet();
                 }
             });
         }, 100, 100, TimeUnit.MILLISECONDS);
@@ -209,7 +217,7 @@ public class ReliableUdpSocket implements AutoCloseable {
 
             // Генерируем последовательный номер
             int currentSeq = nextSeqNumber.getAndIncrement();
-            Packet packet = new Packet(currentSeq, data, false);
+            Packet packet = new Packet(false, currentSeq, data);
             byte[] bytes = serialize(packet);
 
             synchronized (pendingPackets) {
@@ -228,8 +236,7 @@ public class ReliableUdpSocket implements AutoCloseable {
 
     private void handleAck(int ackNumber) {
         receivedAcks.add(ackNumber);
-        Integer first = receivedAcks.first();
-        int lastContinuous = first;
+        int lastContinuous = receivedAcks.first();
 
         // Находим максимальный непрерывный подтвержденный номер
         for (int seq : receivedAcks) {
@@ -282,14 +289,14 @@ public class ReliableUdpSocket implements AutoCloseable {
     }
 
     private void sendAck(int seqNumber, InetAddress senderAddress, int senderPort) throws IOException {
-        Packet ack = new Packet(seqNumber, new byte[0], true);
+        Packet ack = new Packet(true, seqNumber, new byte[0]);
         byte[] bytes = serialize(ack);
         DatagramPacket dp = new DatagramPacket(bytes, bytes.length, senderAddress, senderPort);
         socket.send(dp);
     }
 
-    private byte[] serialize(Packet packet) throws IOException {
-        ByteBuffer buffer = ByteBuffer.allocate(13 + packet.data().length);
+    private byte[] serialize(Packet packet) {
+        ByteBuffer buffer = ByteBuffer.allocate(Packet.headerSize() + packet.data().length);
         buffer.putInt(packet.sequenceNumber());
         buffer.put(packet.isAck() ? (byte)1 : (byte)0);
         buffer.putInt(packet.data().length);
@@ -310,7 +317,7 @@ public class ReliableUdpSocket implements AutoCloseable {
 
             byte[] data = new byte[dataLength];
             buffer.get(data);
-            return new Packet(sequenceNumber, data, isAck);
+            return new Packet(isAck, sequenceNumber, data);
         } catch (BufferUnderflowException e) {
             throw new IOException("Malformed packet", e);
         }
