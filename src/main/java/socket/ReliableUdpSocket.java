@@ -11,7 +11,10 @@ import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.locks.Condition;
+import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.LockSupport;
+import java.util.concurrent.locks.ReentrantLock;
 
 public class ReliableUdpSocket implements AutoCloseable {
     private static final Logger logger = LoggerFactory.getLogger(ReliableUdpSocket.class);
@@ -28,6 +31,9 @@ public class ReliableUdpSocket implements AutoCloseable {
     private final ConcurrentSkipListSet<Integer> receivedAcks = new ConcurrentSkipListSet<>();
     private final BlockingQueue<SendTask> sendQueue = new LinkedBlockingQueue<>();
     private final AtomicInteger windowAvailable = new AtomicInteger(WINDOW_SIZE);
+
+    private final Lock windowLock = new ReentrantLock();
+    private final Condition windowNotFull = windowLock.newCondition();
 
     private int soTimeout = 0;
     private int packetSize = 65507;
@@ -188,34 +194,71 @@ public class ReliableUdpSocket implements AutoCloseable {
         }
     }
 
+    public void send(byte[] data, InetAddress address, int port) throws IOException {
+        windowLock.lock();
+        try {
+            // Ждем, пока не появится место в окне
+            while (windowAvailable.get() <= 0) {
+                try {
+                    windowNotFull.await(100, TimeUnit.MILLISECONDS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new IOException("Send interrupted", e);
+                }
+            }
+
+            // Генерируем последовательный номер
+            int currentSeq = nextSeqNumber.getAndIncrement();
+            Packet packet = new Packet(currentSeq, data, false);
+            byte[] bytes = serialize(packet);
+
+            synchronized (pendingPackets) {
+                pendingPackets.put(currentSeq, new PacketInfo(bytes, address, port));
+                windowAvailable.decrementAndGet();
+            }
+
+            // Отправляем пакет
+            DatagramPacket dp = new DatagramPacket(bytes, bytes.length, address, port);
+            socket.send(dp);
+
+        } finally {
+            windowLock.unlock();
+        }
+    }
+
     private void handleAck(int ackNumber) {
         receivedAcks.add(ackNumber);
         Integer first = receivedAcks.first();
         int lastContinuous = first;
 
+        // Находим максимальный непрерывный подтвержденный номер
         for (int seq : receivedAcks) {
             if (seq != lastContinuous + 1) break;
             lastContinuous = seq;
         }
 
-        synchronized (pendingPackets) {
-            if (lastContinuous > lastAcked.get()) {
-                int delta = lastContinuous - lastAcked.get();
-                lastAcked.set(lastContinuous);
-                int finalLastContinuous = lastContinuous;
-                pendingPackets.keySet().removeIf(seq -> seq <= finalLastContinuous);
-                windowAvailable.addAndGet(delta);
-                receivedAcks.headSet(lastContinuous, true).clear();
-            }
-        }
-    }
-
-    public void send(byte[] data, InetAddress address, int port) throws IOException {
+        windowLock.lock();
         try {
-            sendQueue.put(new SendTask(data, address, port));
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new IOException("Interrupted during send", e);
+            synchronized (pendingPackets) {
+                if (lastContinuous > lastAcked.get()) {
+                    int delta = lastContinuous - lastAcked.get();
+
+                    // Обновляем счетчики
+                    lastAcked.set(lastContinuous);
+                    int finalLastContinuous = lastContinuous;
+                    pendingPackets.keySet().removeIf(seq -> seq <= finalLastContinuous);
+
+                    // Корректируем окно отправки
+                    int newWindow = Math.min(WINDOW_SIZE, windowAvailable.get() + delta);
+                    windowAvailable.set(newWindow);
+
+                    // Очищаем подтвержденные ACK
+                    receivedAcks.headSet(lastContinuous, true).clear();
+                }
+            }
+            windowNotFull.signalAll();
+        } finally {
+            windowLock.unlock();
         }
     }
 
