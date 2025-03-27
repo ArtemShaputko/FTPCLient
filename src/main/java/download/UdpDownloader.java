@@ -16,7 +16,6 @@ import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
-import java.util.Arrays;
 
 public class UdpDownloader implements Downloader{
     private final ReliableUdpSocket socket;
@@ -41,7 +40,7 @@ public class UdpDownloader implements Downloader{
              FileChannel channel = fos.getChannel()) {
             long existingSize = Files.exists(outputPath) ? Files.size(outputPath) : 0;
             if (resume) {
-                writeLong(Long.reverseBytes(existingSize));
+                writeLong(existingSize);
             }
             socket.send("SYN", address, port); // Синхронизация канала
             long extraSize = readLong();
@@ -81,7 +80,6 @@ public class UdpDownloader implements Downloader{
     ) throws IOException {
         Message buffer;
         long received = 0;
-        int read;
         while (received < sizeToReceive) {
             try {
                 buffer = socket.receive();
@@ -113,11 +111,12 @@ public class UdpDownloader implements Downloader{
     private long readLong() throws IOException {
         var bytes = socket.receive().data();
         return ByteBuffer.wrap(bytes)
+                .order(ByteOrder.BIG_ENDIAN)
                 .getLong();
     }
 
     private void writeLong(long value) throws IOException {
-        ByteBuffer buffer = ByteBuffer.allocate(Long.BYTES); // 8 байт
+        ByteBuffer buffer = ByteBuffer.allocate(Long.BYTES).order(ByteOrder.BIG_ENDIAN);
         buffer.putLong(value);
         socket.send(buffer.array(), address, port);
     }

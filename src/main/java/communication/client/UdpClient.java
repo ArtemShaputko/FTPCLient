@@ -2,7 +2,6 @@ package communication.client;
 
 import download.UdpDownloader;
 import org.jline.reader.LineReader;
-import socket.ProgramSocket;
 import socket.ReliableUdpSocket;
 import status.Status;
 
@@ -23,7 +22,7 @@ public class UdpClient extends Client {
 
     @Override
     public void connect() throws IOException {
-        socket = new ReliableUdpSocket(11111);
+        socket = new ReliableUdpSocket();
         socket.setSoTimeout(Client.TIMEOUT);
         socket.send(CONNECT_REQUEST, InetAddress.getByName(serverIp), serverPort);
         isConnected.set(true);
@@ -41,7 +40,7 @@ public class UdpClient extends Client {
     }
 
     @Override
-    public void closeConnection() throws Exception {
+    public void closeConnection() {
         isConnected.set(false);
         if (socket != null) {
             socket.close();

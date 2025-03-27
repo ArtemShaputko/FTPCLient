@@ -53,7 +53,7 @@ public abstract class Client implements AutoCloseable {
         } catch (SocketTimeoutException e) {
             if (!responseBuilder.isEmpty()) {
                 String responseMessage = responseBuilder.toString().trim();
-                return new Response(Status.NO_END, responseMessage.split(" ", 2)[1]);
+                return new Response(Status.NO_END, responseMessage);
             }
             throw e;
         }

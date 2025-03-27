@@ -35,7 +35,7 @@ public class ReliableUdpSocket implements AutoCloseable {
     private final Condition windowNotFull = windowLock.newCondition();
 
     private int soTimeout = 0;
-    private int packetSize;
+    private int packetSize = 65507;
     private final int payloadSize = packetSize - Packet.headerSize();
     private final AtomicInteger nextSeqNumber = new AtomicInteger(0);
     private final AtomicInteger lastAcked = new AtomicInteger(-1);
@@ -82,6 +82,14 @@ public class ReliableUdpSocket implements AutoCloseable {
         startSendWorker();
     }
 
+    public ReliableUdpSocket() throws SocketException {
+        this.socket = new DatagramSocket();
+        this.scheduler = Executors.newScheduledThreadPool(3);
+        startReceiverThread();
+        startRetryChecker();
+        startSendWorker();
+    }
+
     public ReliableUdpSocket(int port) throws SocketException {
         this(port, 65507);
     }
@@ -115,7 +123,8 @@ public class ReliableUdpSocket implements AutoCloseable {
     }
 
     private void handleDataPacket(Packet packet, InetAddress senderAddress, int senderPort) throws IOException {
-        if(packet.sequenceNumber == expectedSeqNumber.get()) {
+//        System.out.println("received packet: " + packet.sequenceNumber() + ", expected " + expectedSeqNumber);
+        if(packet.sequenceNumber <= expectedSeqNumber.get()) {
             sendAck(packet.sequenceNumber(), senderAddress, senderPort);
         }
         bufferAndOrderPackets(packet, senderAddress, senderPort);

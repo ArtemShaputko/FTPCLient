@@ -87,10 +87,10 @@ public class CommunicationManager implements AutoCloseable{
             }
         } catch (NumberFormatException e) {
             writer.println("Ошибка обрабтки строки: " + e.getMessage());
+        } catch (IOException e) {
+            throw e;
         } catch (Exception e) {
-            e.printStackTrace();
             writer.println("Неизвестная ошибка: " + e.getMessage());
-
         }
     }
 
@@ -106,13 +106,16 @@ public class CommunicationManager implements AutoCloseable{
     private void handleServerContext(String line, List<String> words) throws Exception {
         switch (words.getFirst().toLowerCase()) {
             case "close" -> {
-                String response = sendCommand(line).message();
-                if (response != null && !response.isEmpty()) {
-                    writer.println(response);
+                try {
+                    String response = sendCommand(line).message();
+                    if (response != null && !response.isEmpty()) {
+                        writer.println(response);
+                    }
+                } finally {
+                    client.closeConnection();
+                    currentContext = Context.MAIN;
+                    prompt = "> ";
                 }
-                client.closeConnection();
-                currentContext = Context.MAIN;
-                prompt = "> ";
             }
             case "download" -> handleDownload(line, words);
             case "upload" -> handleUpload(line, words);
