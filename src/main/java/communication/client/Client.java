@@ -89,5 +89,5 @@ public abstract class Client implements AutoCloseable {
         downloader.uploadFile(localPath, resume);
     }
 
-    public abstract void closeConnection();
+    public abstract void closeConnection() throws Exception;
 }

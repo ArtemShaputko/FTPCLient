@@ -87,6 +87,10 @@ public class CommunicationManager implements AutoCloseable{
             }
         } catch (NumberFormatException e) {
             writer.println("Ошибка обрабтки строки: " + e.getMessage());
+        } catch (Exception e) {
+            e.printStackTrace();
+            writer.println("Неизвестная ошибка: " + e.getMessage());
+
         }
     }
 
@@ -99,7 +103,7 @@ public class CommunicationManager implements AutoCloseable{
         }
     }
 
-    private void handleServerContext(String line, List<String> words) throws IOException {
+    private void handleServerContext(String line, List<String> words) throws Exception {
         switch (words.getFirst().toLowerCase()) {
             case "close" -> {
                 String response = sendCommand(line).message();
@@ -153,7 +157,7 @@ public class CommunicationManager implements AutoCloseable{
         String ip = words.get(1);
         int port = words.size() > 2 ? Integer.parseInt(words.get(2)) : this.initPort;
         try {
-            client = new UdpClient(ip, port, writer, reader, 1024);
+            client = new UdpClient(ip, port, writer, reader, 3048);
             client.connect();
             currentContext = Context.SERVER;
             prompt = ip + "> ";
@@ -186,8 +190,11 @@ public class CommunicationManager implements AutoCloseable{
         } catch (SocketException e) {
             lastDownload.setInterrupted(true);
             writer.println("Не удалось загрузить файл: " + e.getMessage());
-            client.closeConnection();
-            client.closeConnection();
+            try {
+                client.closeConnection();
+            } catch (Exception e1) {
+                writer.println("Ошибка при закрытии: " + e1.getMessage());
+            }
             currentContext = Context.MAIN;
             prompt = "> ";
         }
@@ -217,7 +224,11 @@ public class CommunicationManager implements AutoCloseable{
                 lastUpload.setInterrupted(true);
             }
             writer.println("Не удалось выгрузить файл: " + e.getMessage());
-            client.closeConnection();
+            try {
+                client.closeConnection();
+            } catch (Exception e1) {
+                writer.println("Ошибка при закрытии: " + e1.getMessage());
+            }
             currentContext = Context.MAIN;
             prompt = "> ";
         }
