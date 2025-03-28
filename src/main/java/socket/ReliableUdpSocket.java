@@ -22,11 +22,12 @@ public class ReliableUdpSocket implements AutoCloseable {
     private static final int MAX_SEQUENCE = Integer.MAX_VALUE;
 
     private final DatagramSocket socket;
-    private final ScheduledExecutorService scheduler;
+    private volatile boolean isRunning = false;
+    private ScheduledExecutorService scheduler;
+    private final Lock controlLock = new ReentrantLock();
     private final Map<Integer, PacketInfo> pendingPackets = new ConcurrentHashMap<>();
     private final BlockingQueue<Message> receivedQueue = new LinkedBlockingQueue<>();
     private final TreeMap<Integer, Message> orderedBuffer = new TreeMap<>();
-    private final ConcurrentSkipListSet<Integer> receivedAcks = new ConcurrentSkipListSet<>();
     private final AtomicInteger windowAvailable = new AtomicInteger(WINDOW_SIZE);
 
     private final Lock windowLock = new ReentrantLock();
@@ -67,43 +68,78 @@ public class ReliableUdpSocket implements AutoCloseable {
     }
 
     public ReliableUdpSocket(int port, int packetSize) throws SocketException {
+        this(port, packetSize, false);
+    }
+
+    public ReliableUdpSocket(int port, int packetSize, boolean toStart) throws SocketException {
         if (packetSize <= Packet.headerSize() || packetSize > 65507) {
             throw new IllegalArgumentException("Invalid packet size");
         }
         this.packetSize = packetSize;
         this.socket = new DatagramSocket(port);
-        this.scheduler = Executors.newScheduledThreadPool(3);
-        startReceiverThread();
-        startRetryChecker();
+        if (toStart) {
+            startServices();
+        }
+    }
+
+    public ReliableUdpSocket(int packetSize, boolean toStart) throws SocketException {
+        if (packetSize <= Packet.headerSize() || packetSize > 65507) {
+            throw new IllegalArgumentException("Invalid packet size");
+        }
+        this.packetSize = packetSize;
+        this.socket = new DatagramSocket();
+        if (toStart) {
+            startServices();
+        }
+    }
+
+    public ReliableUdpSocket(boolean toStart) throws SocketException {
+        this(65507, toStart);
     }
 
     public ReliableUdpSocket() throws SocketException {
-        this.socket = new DatagramSocket();
-        this.scheduler = Executors.newScheduledThreadPool(3);
-        startReceiverThread();
-        startRetryChecker();
+        this(65507, false);
     }
 
     public ReliableUdpSocket(int port) throws SocketException {
         this(port, 65507);
     }
 
-    private void startReceiverThread() {
-        scheduler.execute(() -> {
-            byte[] buffer = new byte[packetSize];
-            DatagramPacket packet = new DatagramPacket(buffer, buffer.length);
+    public void startServices() {
+        controlLock.lock();
+        resetState();
+        try {
+            if (!isRunning) {
+                isRunning = true;
+                scheduler = Executors.newScheduledThreadPool(3);
 
-            while (!scheduler.isShutdown()) {
-                try {
-                    socket.receive(packet);
-                    processPacket(packet);
-                } catch (Exception e) {
-                    if (!socket.isClosed()) {
-                        logger.error("Receive error", e);
+                startReceiverThread();
+                startRetryChecker();
+                logger.info("Services started");
+            }
+        } finally {
+            controlLock.unlock();
+        }
+    }
+
+    private void startReceiverThread() {
+        if (scheduler != null && !scheduler.isShutdown()) {
+            scheduler.execute(() -> {
+                byte[] buffer = new byte[packetSize];
+                DatagramPacket packet = new DatagramPacket(buffer, buffer.length);
+
+                while (!scheduler.isShutdown()) {
+                    try {
+                        socket.receive(packet);
+                        processPacket(packet);
+                    } catch (Exception e) {
+                        if (!socket.isClosed()) {
+                            logger.error("Receive error", e);
+                        }
                     }
                 }
-            }
-        });
+            });
+        }
     }
 
     private void processPacket(DatagramPacket udpPacket) throws IOException {
@@ -117,7 +153,7 @@ public class ReliableUdpSocket implements AutoCloseable {
     }
 
     private void handleDataPacket(Packet packet, InetAddress senderAddress, int senderPort) throws IOException {
-        System.out.println("received packet: " + packet.sequenceNumber() + ", expected " + expectedSeqNumber);
+        logger.debug("received packet: {}, expected packet: {}", packet.sequenceNumber, expectedSeqNumber);
         if(packet.sequenceNumber <= expectedSeqNumber.get()) {
             sendAck(packet.sequenceNumber(), senderAddress, senderPort);
         }
@@ -145,17 +181,19 @@ public class ReliableUdpSocket implements AutoCloseable {
     }
 
     private void startRetryChecker() {
-        scheduler.scheduleAtFixedRate(() -> {
-            long now = System.currentTimeMillis();
-            pendingPackets.forEach((seq, info) -> {
-                long elapsed = now - info.lastSentTime;
-                int timeout = BASE_RETRY_TIMEOUT_MS * (1 << info.retries);
+        if (scheduler != null && !scheduler.isShutdown()) {
+            scheduler.scheduleAtFixedRate(() -> {
+                long now = System.currentTimeMillis();
+                pendingPackets.forEach((seq, info) -> {
+                    long elapsed = now - info.lastSentTime;
+                    int timeout = BASE_RETRY_TIMEOUT_MS * (1 << info.retries);
 
-                if (elapsed > timeout) {
-                    resendPacket(seq, info);
-                }
-            });
-        }, 100, 100, TimeUnit.MILLISECONDS);
+                    if (elapsed > timeout) {
+                        resendPacket(seq, info);
+                    }
+                });
+            }, 100, 100, TimeUnit.MILLISECONDS);
+        }
     }
 
     private void resendPacket(int seqNumber, PacketInfo info) {
@@ -174,6 +212,10 @@ public class ReliableUdpSocket implements AutoCloseable {
         } catch (IOException e) {
             logger.error("Failed to resend packet [seq={}]: {}", seqNumber, e.getMessage());
         }
+    }
+
+    public void send(byte[] data, InetAddress address, int port) throws IOException {
+        send(data, address, port, 0);
     }
 
     public void send(byte[] data, InetAddress address, int port, long timeoutMillis) throws IOException {
@@ -210,7 +252,6 @@ public class ReliableUdpSocket implements AutoCloseable {
                 windowAvailable.decrementAndGet();
             }
             DatagramPacket dp = new DatagramPacket(bytes, bytes.length, address, port);
-            logger.debug("Send packet {}", packet.sequenceNumber());
             socket.send(dp);
         } finally {
             windowLock.unlock();
@@ -218,33 +259,21 @@ public class ReliableUdpSocket implements AutoCloseable {
     }
 
     private void handleAck(int ackNumber) {
-        receivedAcks.add(ackNumber);
-        int lastContinuous = receivedAcks.first();
-
-        // Находим максимальный непрерывный подтвержденный номер
-        for (int seq : receivedAcks) {
-            if (seq != lastContinuous + 1) break;
-            lastContinuous = seq;
-        }
+        logger.debug("received ACK {}", ackNumber);
 
         windowLock.lock();
         try {
             synchronized (pendingPackets) {
-                if (lastContinuous > lastAcked.get()) {
-                    int delta = lastContinuous - lastAcked.get();
+                int delta = ackNumber - lastAcked.get();
 
-                    // Обновляем счетчики
-                    lastAcked.set(lastContinuous);
-                    int finalLastContinuous = lastContinuous;
-                    pendingPackets.keySet().removeIf(seq -> seq <= finalLastContinuous);
+                // Обновляем счетчики
+                lastAcked.set(ackNumber);
+                pendingPackets.keySet().removeIf(seq -> seq <= ackNumber);
 
-                    // Корректируем окно отправки
-                    int newWindow = Math.min(WINDOW_SIZE, windowAvailable.get() + delta);
-                    windowAvailable.set(newWindow);
+                // Корректируем окно отправки
+                int newWindow = Math.min(WINDOW_SIZE, windowAvailable.get() + delta);
+                windowAvailable.set(newWindow);
 
-                    // Очищаем подтвержденные ACK
-                    receivedAcks.headSet(lastContinuous, true).clear();
-                }
             }
             windowNotFull.signalAll();
         } finally {
@@ -278,7 +307,7 @@ public class ReliableUdpSocket implements AutoCloseable {
         socket.send(dp);
     }
 
-    private byte[] serialize(Packet packet) {
+    private byte[] serialize(Packet packet) throws IOException {
         ByteBuffer buffer = ByteBuffer.allocate(Packet.headerSize() + packet.data().length);
         buffer.putInt(packet.sequenceNumber());
         buffer.put(packet.isAck() ? (byte)1 : (byte)0);
@@ -314,10 +343,6 @@ public class ReliableUdpSocket implements AutoCloseable {
         this.soTimeout = Math.max(timeout, 0);
     }
 
-    public void send(byte[] data, InetAddress address, int port) throws IOException {
-        send(data, address, port, 0);
-    }
-
     public void send(String message, InetAddress address, int port) throws IOException {
         send(message, address, port, 0);
     }
@@ -339,16 +364,45 @@ public class ReliableUdpSocket implements AutoCloseable {
         send(message, charsetName, address, port, 0);
     }
 
+    public void stopServices() {
+        controlLock.lock();
+        resetState();
+        try {
+            if (isRunning) {
+                isRunning = false;
+                // Останавливаем пул потоков
+                if (scheduler != null) {
+                    scheduler.shutdown();
+                    try {
+                        if (!scheduler.awaitTermination(500, TimeUnit.MILLISECONDS)) {
+                            scheduler.shutdownNow();
+                        }
+                    } catch (InterruptedException e) {
+                        logger.error("Shutdown interrupted", e);
+                        Thread.currentThread().interrupt();
+                    }
+                    scheduler = null; // Важно: сбрасываем ссылку
+                }
+                logger.info("Services stopped");
+            }
+        } finally {
+            controlLock.unlock();
+        }
+    }
+
+    private void resetState() {
+        nextSeqNumber.set(0);
+        lastAcked.set(-1);
+        expectedSeqNumber.set(0);
+        pendingPackets.clear();
+        receivedQueue.clear();
+        orderedBuffer.clear();
+        windowAvailable.set(WINDOW_SIZE);
+    }
+
     @Override
     public void close() {
-        scheduler.shutdown();
+        stopServices();
         socket.close();
-        try {
-            if (!scheduler.awaitTermination(1, TimeUnit.SECONDS)) {
-                scheduler.shutdownNow();
-            }
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-        }
     }
 }

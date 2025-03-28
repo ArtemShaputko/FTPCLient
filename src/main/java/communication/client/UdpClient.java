@@ -20,9 +20,10 @@ public class UdpClient extends Client {
 
     @Override
     public void connect() throws IOException {
-        socket = new ReliableUdpSocket();
+        socket = new ReliableUdpSocket(true);
         socket.setSoTimeout(Client.TIMEOUT);
         socket.send(CONNECT_REQUEST, InetAddress.getByName(serverIp), serverPort);
+        socket.receive(30_000);
         isConnected.set(true);
         downloader = new UdpDownloader(socket,
                 consoleWriter,
