@@ -95,7 +95,7 @@ public class CommunicationManager implements AutoCloseable{
         }
     }
 
-    private void handleMainContext(List<String> words) {
+    private void handleMainContext(List<String> words) throws Exception {
         switch (words.getFirst().toLowerCase()) {
             case "exit" -> toStop = true;
             case "help" -> showMainHelp();
@@ -152,7 +152,7 @@ public class CommunicationManager implements AutoCloseable{
         }
     }
 
-    private void connectToServer(List<String> words) {
+    private void connectToServer(List<String> words) throws Exception {
         if (words.size() < 2) {
             writer.println("Применение: connect <host> [port] [UDP]");
             return;
@@ -175,6 +175,9 @@ public class CommunicationManager implements AutoCloseable{
             this.port = port;
         } catch (IOException e) {
             writer.println("Невозможно подключиться к серверу: " + e.getMessage());
+            if (writer != null) {
+                client.close();
+            }
         }
     }
 
