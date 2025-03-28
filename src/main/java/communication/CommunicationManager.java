@@ -210,7 +210,7 @@ public class CommunicationManager implements AutoCloseable{
         }
     }
 
-    private void handleUpload(String command, List<String> words) throws IOException {
+    private void handleUpload(String command, List<String> words) {
         if (words.size() < 3) {
             writer.println("Применение: upload <remote> <local> [continue]");
             return;
@@ -272,7 +272,7 @@ public class CommunicationManager implements AutoCloseable{
         }
     }
 
-    private Response sendCommand(String command) throws IOException {
+    private Response sendCommand(String command) {
         var response = new Response(Status.ERROR, "Неизвестная ошибка");
         var resume = true;
         while (resume) {
@@ -282,7 +282,7 @@ public class CommunicationManager implements AutoCloseable{
             } catch (SocketTimeoutException _) {
                 resume = handleTimeout("Нет ответа от сервера, отправить команду снова?");
                 if (!resume) {
-                    throw new IOException("Время ожидания истекло");
+                    break;
                 }
             } catch (IOException e) {
                 response = new Response(Status.ERROR, e.getMessage());

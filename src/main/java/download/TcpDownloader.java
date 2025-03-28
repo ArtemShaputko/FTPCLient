@@ -1,6 +1,5 @@
 package download;
 
-import communication.client.Client;
 import me.tongfei.progressbar.ProgressBar;
 import me.tongfei.progressbar.ProgressBarBuilder;
 import org.jline.reader.LineReader;
@@ -14,6 +13,7 @@ import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.Arrays;
 import java.util.concurrent.*;
 
 public class TcpDownloader implements Downloader{
@@ -114,45 +114,63 @@ public class TcpDownloader implements Downloader{
             long skipped = 0;
             long currentFileSize = 0;
             dos.write(1); // Синхронизация канала
-            if(resume) {
+            if (resume) {
                 currentFileSize = Long.reverseBytes(dis.readLong());
                 skipped = input.skip(currentFileSize);
             }
-            if( skipped == currentFileSize) {
-                total =input.available();
+            if (skipped == currentFileSize) {
+                total = input.available();
             }
             dos.writeLong(Long.reverseBytes(total));
             dos.flush();
             ByteBuffer buffer = ByteBuffer.allocate(8192);
+            ExecutorService executor = Executors.newSingleThreadExecutor(); // Важно: только 1 поток!
 
-            try(ProgressBar pb = new ProgressBar("Передача " + localPath, total + currentFileSize)) {
+            try (ProgressBar pb = new ProgressBar("Передача " + localPath, total + currentFileSize)) {
                 pb.stepTo(currentFileSize);
+                CompletableFuture<Void> currentOperation = CompletableFuture.completedFuture(null);
+
                 while ((bytesRead = input.read(buffer.array())) != -1) {
+                    byte[] dataCopy = Arrays.copyOf(buffer.array(), bytesRead); // Копируем данные
                     int finalBytesRead = bytesRead;
-                    CompletableFuture<Void> writeFuture = CompletableFuture.runAsync(() -> {
+
+                    // Создаем новую операцию, привязанную к предыдущей
+                    CompletableFuture<Void> newOperation = currentOperation.thenRunAsync(() -> {
                         try {
-                            dos.write(buffer.array(), 0, finalBytesRead);
+                            dos.write(dataCopy, 0, finalBytesRead);
+                            pb.stepBy(finalBytesRead);
                         } catch (IOException e) {
                             throw new CompletionException(e);
                         }
-                    });
+                    }, executor);
+
+                    currentOperation = newOperation; // Обновляем цепочку
+
                     try {
-                        writeFuture.get(Client.TIMEOUT, TimeUnit.MILLISECONDS);
-                        pb.stepBy(bytesRead);
+                        // Ждем завершения текущей операции с таймаутом
+                        newOperation.get(30_000, TimeUnit.MILLISECONDS);
                     } catch (TimeoutException e) {
-                        writeFuture.cancel(true);
+                        pb.pause();
+                        consoleWriter.println("\nМедленное соединение, желаете продолжить?");
+                        if ("y".equals(consoleReader.readLine("(y/n) "))) {
+                            pb.resume();
+                            continue;
+                        }
+                        executor.shutdownNow();
                         throw new SocketException("Таймаут записи блока данных");
                     }
                 }
-            }
-            consoleWriter.println("Начальный размер файла: " + currentFileSize + " байт");
-            consoleWriter.println("Передано: " +  total + " байт");
+                currentOperation.get();
+                consoleWriter.println("Начальный размер файла: " + currentFileSize + " байт");
+                consoleWriter.println("Передано: " + total + " байт");
 
-        } catch (IOException | ExecutionException | InterruptedException  e){
-            Throwable cause = e instanceof ExecutionException ? e.getCause() : e;
-            throw new CompletionException(cause);
-        }finally {
-            dos.flush();
+            } catch (IOException | ExecutionException | InterruptedException e) {
+                Throwable cause = e instanceof ExecutionException ? e.getCause() : e;
+                throw new CompletionException(cause);
+            } finally {
+                executor.shutdown();
+                dos.flush();
+            }
         }
     }
 }

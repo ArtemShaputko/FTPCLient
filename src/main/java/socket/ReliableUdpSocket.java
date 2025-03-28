@@ -13,7 +13,6 @@ import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.Lock;
-import java.util.concurrent.locks.LockSupport;
 import java.util.concurrent.locks.ReentrantLock;
 
 public class ReliableUdpSocket implements AutoCloseable {
@@ -28,7 +27,6 @@ public class ReliableUdpSocket implements AutoCloseable {
     private final BlockingQueue<Message> receivedQueue = new LinkedBlockingQueue<>();
     private final TreeMap<Integer, Message> orderedBuffer = new TreeMap<>();
     private final ConcurrentSkipListSet<Integer> receivedAcks = new ConcurrentSkipListSet<>();
-    private final BlockingQueue<SendTask> sendQueue = new LinkedBlockingQueue<>();
     private final AtomicInteger windowAvailable = new AtomicInteger(WINDOW_SIZE);
 
     private final Lock windowLock = new ReentrantLock();
@@ -68,8 +66,6 @@ public class ReliableUdpSocket implements AutoCloseable {
         }
     }
 
-    private record SendTask(byte[] data, InetAddress address, int port) {}
-
     public ReliableUdpSocket(int port, int packetSize) throws SocketException {
         if (packetSize <= Packet.headerSize() || packetSize > 65507) {
             throw new IllegalArgumentException("Invalid packet size");
@@ -79,7 +75,6 @@ public class ReliableUdpSocket implements AutoCloseable {
         this.scheduler = Executors.newScheduledThreadPool(3);
         startReceiverThread();
         startRetryChecker();
-        startSendWorker();
     }
 
     public ReliableUdpSocket() throws SocketException {
@@ -87,7 +82,6 @@ public class ReliableUdpSocket implements AutoCloseable {
         this.scheduler = Executors.newScheduledThreadPool(3);
         startReceiverThread();
         startRetryChecker();
-        startSendWorker();
     }
 
     public ReliableUdpSocket(int port) throws SocketException {
@@ -123,7 +117,7 @@ public class ReliableUdpSocket implements AutoCloseable {
     }
 
     private void handleDataPacket(Packet packet, InetAddress senderAddress, int senderPort) throws IOException {
-//        System.out.println("received packet: " + packet.sequenceNumber() + ", expected " + expectedSeqNumber);
+        System.out.println("received packet: " + packet.sequenceNumber() + ", expected " + expectedSeqNumber);
         if(packet.sequenceNumber <= expectedSeqNumber.get()) {
             sendAck(packet.sequenceNumber(), senderAddress, senderPort);
         }
@@ -148,35 +142,6 @@ public class ReliableUdpSocket implements AutoCloseable {
                 orderedBuffer.remove(firstKey);
             }
         }
-    }
-
-    private void startSendWorker() {
-        scheduler.execute(() -> {
-            while (!scheduler.isShutdown()) {
-                try {
-                    SendTask task = sendQueue.poll(100, TimeUnit.MILLISECONDS);
-                    if (task == null) continue;
-
-                    while (windowAvailable.get() <= 0) {
-                        LockSupport.parkNanos(1_000_000);
-                    }
-
-                    int currentSeq = nextSeqNumber.getAndIncrement();
-                    Packet packet = new Packet(false, currentSeq, task.data);
-                    byte[] bytes = serialize(packet);
-
-                    synchronized (pendingPackets) {
-                        pendingPackets.put(currentSeq, new PacketInfo(bytes, task.address, task.port));
-                        windowAvailable.decrementAndGet();
-                    }
-
-                    DatagramPacket dp = new DatagramPacket(bytes, bytes.length, task.address, task.port);
-                    socket.send(dp);
-                } catch (Exception e) {
-                    logger.error("Send worker error", e);
-                }
-            }
-        });
     }
 
     private void startRetryChecker() {
@@ -245,6 +210,7 @@ public class ReliableUdpSocket implements AutoCloseable {
                 windowAvailable.decrementAndGet();
             }
             DatagramPacket dp = new DatagramPacket(bytes, bytes.length, address, port);
+            logger.debug("Send packet {}", packet.sequenceNumber());
             socket.send(dp);
         } finally {
             windowLock.unlock();
