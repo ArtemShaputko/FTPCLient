@@ -211,33 +211,41 @@ public class ReliableUdpSocket implements AutoCloseable {
         }
     }
 
-    public void send(byte[] data, InetAddress address, int port) throws IOException {
+    public void send(byte[] data, InetAddress address, int port, long timeoutMillis) throws IOException {
+        final long startTime = System.currentTimeMillis();
         windowLock.lock();
         try {
-            // Ждем, пока не появится место в окне
             while (windowAvailable.get() <= 0) {
-                try {
-                    windowNotFull.await(100, TimeUnit.MILLISECONDS);
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    throw new IOException("Send interrupted", e);
+                if (timeoutMillis > 0) {
+                    long elapsed = System.currentTimeMillis() - startTime;
+                    if (elapsed >= timeoutMillis) {
+                        throw new SocketTimeoutException("Send timeout after " + timeoutMillis + "ms");
+                    }
+                    long remaining = timeoutMillis - elapsed;
+                    try {
+                        windowNotFull.await(remaining, TimeUnit.MILLISECONDS);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        throw new IOException("Send interrupted", e);
+                    }
+                } else {
+                    try {
+                        windowNotFull.await();
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        throw new IOException("Send interrupted", e);
+                    }
                 }
             }
-
-            // Генерируем последовательный номер
             int currentSeq = nextSeqNumber.getAndIncrement();
             Packet packet = new Packet(false, currentSeq, data);
             byte[] bytes = serialize(packet);
-
             synchronized (pendingPackets) {
                 pendingPackets.put(currentSeq, new PacketInfo(bytes, address, port));
                 windowAvailable.decrementAndGet();
             }
-
-            // Отправляем пакет
             DatagramPacket dp = new DatagramPacket(bytes, bytes.length, address, port);
             socket.send(dp);
-
         } finally {
             windowLock.unlock();
         }
@@ -340,17 +348,29 @@ public class ReliableUdpSocket implements AutoCloseable {
         this.soTimeout = Math.max(timeout, 0);
     }
 
-    public void send(String message, InetAddress address, int port) throws IOException {
-        send(message, StandardCharsets.UTF_8.name(), address, port);
+    public void send(byte[] data, InetAddress address, int port) throws IOException {
+        send(data, address, port, 0);
     }
 
-    public void send(String message, String charsetName, InetAddress address, int port) throws IOException {
+    public void send(String message, InetAddress address, int port) throws IOException {
+        send(message, address, port, 0);
+    }
+
+    public void send(String message, InetAddress address, int port, int timeout) throws IOException {
+        send(message, StandardCharsets.UTF_8.name(), address, port, timeout);
+    }
+
+    public void send(String message, String charsetName, InetAddress address, int port, int timeout) throws IOException {
         try {
             byte[] data = message.getBytes(charsetName);
-            send(data, address, port);
+            send(data, address, port, timeout);
         } catch (UnsupportedEncodingException e) {
             throw new IOException("Unsupported charset: " + charsetName, e);
         }
+    }
+
+    public void send(String message, String charsetName, InetAddress address, int port) throws IOException {
+        send(message, charsetName, address, port, 0);
     }
 
     @Override

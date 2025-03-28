@@ -11,13 +11,11 @@ import java.net.InetAddress;
 
 public class UdpClient extends Client {
     private ReliableUdpSocket socket;
-    int bufferSize;
     public static final String CONNECT_REQUEST = Status.CONNECT.code() + " CONNECT";
 
 
-    public UdpClient(String ip, int port, PrintWriter consoleWriter, LineReader consoleReader, int bufferSize) {
+    public UdpClient(String ip, int port, PrintWriter consoleWriter, LineReader consoleReader) {
         super(ip, port, consoleWriter, consoleReader);
-        this.bufferSize = bufferSize;
     }
 
     @Override
@@ -26,7 +24,13 @@ public class UdpClient extends Client {
         socket.setSoTimeout(Client.TIMEOUT);
         socket.send(CONNECT_REQUEST, InetAddress.getByName(serverIp), serverPort);
         isConnected.set(true);
-        downloader = new UdpDownloader(socket,consoleWriter,consoleReader, InetAddress.getByName(serverIp), serverPort);
+        downloader = new UdpDownloader(socket,
+                consoleWriter,
+                consoleReader,
+                InetAddress.getByName(serverIp),
+                serverPort,
+                65507 - 9,
+                180_000);
     }
 
     @Override
@@ -48,7 +52,7 @@ public class UdpClient extends Client {
     }
 
     @Override
-    public void close() throws Exception {
+    public void close() {
         closeConnection();
     }
 }

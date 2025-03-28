@@ -16,20 +16,25 @@ import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.Arrays;
 
-public class UdpDownloader implements Downloader{
+public class UdpDownloader implements Downloader {
     private final ReliableUdpSocket socket;
     private final PrintWriter consoleWriter;
     private final LineReader consoleReader;
     private final InetAddress address;
+    private final int bufferSize;
+    private final int sendTimeout;
     private final int port;
 
-    public UdpDownloader(ReliableUdpSocket socket, PrintWriter consoleWriter, LineReader consoleReader, InetAddress address, int port) {
+    public UdpDownloader(ReliableUdpSocket socket, PrintWriter consoleWriter, LineReader consoleReader, InetAddress address, int port, int bufferSize, int sendTimeout) {
         this.socket = socket;
         this.consoleWriter = consoleWriter;
         this.consoleReader = consoleReader;
         this.address = address;
+        this.bufferSize = bufferSize;
         this.port = port;
+        this.sendTimeout = sendTimeout;
     }
 
     @Override
@@ -105,7 +110,43 @@ public class UdpDownloader implements Downloader{
 
     @Override
     public void uploadFile(String localPath, boolean resume) throws IOException {
+        try (var input = new FileInputStream(localPath)) {
+            int bytesRead;
+            long total = 0;
+            long skipped = 0;
+            long currentFileSize = 0;
+            socket.send("SYN", address, port);
+            if (resume) {
+                currentFileSize = readLong();
+                skipped = input.skip(currentFileSize);
+            }
+            if (skipped == currentFileSize) {
+                total = input.available();
+            }
+            writeLong(total);
+            ByteBuffer buffer = ByteBuffer.allocate(bufferSize);
 
+            try (ProgressBar pb = new ProgressBar("Передача " + localPath, total + currentFileSize)) {
+                pb.stepTo(currentFileSize);
+                while ((bytesRead = input.read(buffer.array())) != -1) {
+                    try {
+                        socket.send(Arrays.copyOf(buffer.array(), bytesRead), address, port, sendTimeout);
+                        pb.stepBy(bytesRead);
+                    } catch (SocketTimeoutException e) {
+                        pb.pause();
+                        consoleWriter.println("\nМедленное соединение, желаете продолжить?");
+                        if ("y".equals(consoleReader.readLine("(y/n) "))) {
+                            pb.resume();
+                            continue;
+                        }
+                        throw new SocketException("Нет ответа от сервера");
+                    }
+                }
+            }
+            consoleWriter.println("Начальный размер файла: " + currentFileSize + " байт");
+            consoleWriter.println("Передано: " + total + " байт");
+
+        }
     }
 
     private long readLong() throws IOException {

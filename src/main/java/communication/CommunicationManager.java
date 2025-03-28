@@ -1,6 +1,7 @@
 package communication;
 
 import communication.client.Client;
+import communication.client.TcpClient;
 import communication.client.UdpClient;
 import org.jline.reader.*;
 import org.jline.reader.impl.DefaultParser;
@@ -153,14 +154,20 @@ public class CommunicationManager implements AutoCloseable{
 
     private void connectToServer(List<String> words) {
         if (words.size() < 2) {
-            writer.println("Применение: connect <host> [port]");
+            writer.println("Применение: connect <host> [port] [UDP]");
             return;
         }
 
         String ip = words.get(1);
-        int port = words.size() > 2 ? Integer.parseInt(words.get(2)) : this.initPort;
+        boolean isUDP = words.getLast().equalsIgnoreCase("udp");
+        int port = words.size() > 2 && !isUDP ? Integer.parseInt(words.get(2)) : this.initPort;
         try {
-            client = new UdpClient(ip, port, writer, reader, 3048);
+            if(isUDP) {
+                client = new UdpClient(ip, port, writer, reader);
+            } else {
+                client = new TcpClient(ip, port, writer, reader);
+            }
+
             client.connect();
             currentContext = Context.SERVER;
             prompt = ip + "> ";
@@ -209,7 +216,7 @@ public class CommunicationManager implements AutoCloseable{
             return;
         }
         String response = sendCommand(command).message();
-        String localFileName = fileDir + words.get(2);
+        String localFileName = fileDir + words.get(1);
         if (response != null && !response.isEmpty()) {
             writer.println(response);
         }
@@ -239,7 +246,7 @@ public class CommunicationManager implements AutoCloseable{
 
     private void showMainHelp() {
         writer.println("Доступные команды:");
-        writer.println("\tconnect <host> [port] - Подключиться к серверу");
+        writer.println("\tconnect <host> [port] [UDP] - Подключиться к серверу");
         writer.println("\texit                  - Выйти из программы");
         writer.println("\thelp                  - Окно помощи");
     }
