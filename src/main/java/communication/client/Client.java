@@ -11,7 +11,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 public abstract class Client implements AutoCloseable {
     protected final String serverIp;
-    protected final int serverPort;
+    protected int serverPort;
 
     protected final PrintWriter consoleWriter;
     protected final LineReader consoleReader;

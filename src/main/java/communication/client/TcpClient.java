@@ -20,6 +20,15 @@ public class TcpClient extends Client {
 
     @Override
     public void connect() throws IOException {
+        try(Socket tempSocket = new Socket()) {
+            tempSocket.connect(new InetSocketAddress(serverIp, serverPort), TIMEOUT);
+            socketWriter = new PrintWriter(tempSocket.getOutputStream(), true);
+            socketReader = new BufferedReader(new InputStreamReader(tempSocket.getInputStream()));
+            serverPort = Integer.parseInt(socketReader.readLine());
+            Thread.sleep(1000);
+        } catch (InterruptedException e) {
+            consoleWriter.println("Процесс соединения прервали");
+        }
         socket = new Socket();
         socket.connect(new InetSocketAddress(serverIp, serverPort), TIMEOUT);
         socket.setSoTimeout(TIMEOUT);
@@ -31,7 +40,7 @@ public class TcpClient extends Client {
     }
 
     @Override
-    public void writeMessage(String message) throws IOException {
+    public void writeMessage(String message) {
         if (socketWriter != null) {
             socketWriter.println(message);
         }
@@ -53,7 +62,7 @@ public class TcpClient extends Client {
     }
 
     @Override
-    public void close() throws Exception {
+    public void close() {
         closeConnection();
     }
 }

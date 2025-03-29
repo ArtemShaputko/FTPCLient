@@ -8,6 +8,7 @@ import status.Status;
 import java.io.IOException;
 import java.io.PrintWriter;
 import java.net.InetAddress;
+import java.net.SocketException;
 
 public class UdpClient extends Client {
     private ReliableUdpSocket socket;
@@ -23,7 +24,13 @@ public class UdpClient extends Client {
         socket = new ReliableUdpSocket(true);
         socket.setSoTimeout(Client.TIMEOUT);
         socket.send(CONNECT_REQUEST, InetAddress.getByName(serverIp), serverPort);
-        socket.receive(30_000);
+        var accept = socket.receive(30_000);
+        if(!ACCEPT_MESSAGE.equals(accept.text())) {
+            throw new SocketException("Ошибка на сервере: " + accept.text());
+        }
+        var message = socket.receive(30_000);
+        this.serverPort = Integer.parseInt(message.text());
+        connectSecondStep();
         isConnected.set(true);
         downloader = new UdpDownloader(socket,
                 consoleWriter,
@@ -32,6 +39,16 @@ public class UdpClient extends Client {
                 serverPort,
                 65507 - 9,
                 15_000);
+    }
+
+    private void connectSecondStep() throws IOException {
+        socket.stopServices();
+        socket.startServices();
+        System.out.println(serverPort);
+        socket.send(CONNECT_REQUEST, InetAddress.getByName(serverIp), serverPort);
+        if(!ACCEPT_MESSAGE.equals(socket.receive(30_000).text())) {
+            throw new SocketException("Ошибка на сервере");
+        }
     }
 
     @Override
