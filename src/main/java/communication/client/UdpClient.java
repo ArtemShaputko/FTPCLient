@@ -31,7 +31,7 @@ public class UdpClient extends Client {
                 InetAddress.getByName(serverIp),
                 serverPort,
                 65507 - 9,
-                30_000);
+                15_000);
     }
 
     @Override

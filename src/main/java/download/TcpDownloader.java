@@ -144,10 +144,9 @@ public class TcpDownloader implements Downloader{
                         }
                     }, executor);
 
-                    currentOperation = newOperation; // Обновляем цепочку
+                    currentOperation = newOperation;
 
                     try {
-                        // Ждем завершения текущей операции с таймаутом
                         newOperation.get(30_000, TimeUnit.MILLISECONDS);
                     } catch (TimeoutException e) {
                         pb.pause();

@@ -125,22 +125,27 @@ public class UdpDownloader implements Downloader {
             }
             writeLong(total);
             ByteBuffer buffer = ByteBuffer.allocate(bufferSize);
+            boolean toSend;
 
             try (ProgressBar pb = new ProgressBar("Передача " + localPath, total + currentFileSize)) {
                 pb.stepTo(currentFileSize);
                 while ((bytesRead = input.read(buffer.array())) != -1) {
-                    try {
-                        socket.send(Arrays.copyOf(buffer.array(), bytesRead), address, port, sendTimeout);
-                        pb.stepBy(bytesRead);
-                    } catch (SocketTimeoutException e) {
-                        pb.pause();
-                        consoleWriter.println("\nМедленное соединение, желаете продолжить?");
-                        if ("y".equals(consoleReader.readLine("(y/n) "))) {
-                            pb.resume();
-                            continue;
+                    do {
+                        toSend = false;
+                        try {
+                            socket.send(Arrays.copyOf(buffer.array(), bytesRead), address, port, sendTimeout);
+                            pb.stepBy(bytesRead);
+                        } catch (SocketTimeoutException e) {
+                            pb.pause();
+                            consoleWriter.println("\nМедленное соединение, желаете продолжить?");
+                            if ("y".equals(consoleReader.readLine("(y/n) "))) {
+                                pb.resume();
+                                toSend = true;
+                                continue;
+                            }
+                            throw new SocketException("Нет ответа от сервера");
                         }
-                        throw new SocketException("Нет ответа от сервера");
-                    }
+                    } while (toSend);
                 }
             }
             consoleWriter.println("Начальный размер файла: " + currentFileSize + " байт");

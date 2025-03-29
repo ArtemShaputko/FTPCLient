@@ -173,9 +173,9 @@ public class CommunicationManager implements AutoCloseable{
             prompt = ip + "> ";
             this.serverAddress = ip;
             this.port = port;
-        } catch (IOException e) {
+        } catch (Exception e) {
             writer.println("Невозможно подключиться к серверу: " + e.getMessage());
-            if (writer != null) {
+            if (client != null) {
                 client.close();
             }
         }
